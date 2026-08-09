@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from codex_alias import CodexAlias, Config, InvalidNameError
+from codex_alias import (
+    CodexAlias,
+    CodexAliasError,
+    Config,
+    InvalidNameError,
+    ProfileNotFoundError,
+)
 from codex_alias.models import HomeKind
 
 
@@ -45,6 +51,82 @@ def test_remove_wrapper(mgr: CodexAlias) -> None:
     assert (mgr.config.profile_root / "work").is_dir()
     _, removed_again = mgr.remove_wrapper("work")
     assert removed_again is False
+
+
+def test_remove_profile_deletes_wrapper_and_home(mgr: CodexAlias) -> None:
+    mgr.add_profile("work")
+    mgr.add_profile("play")
+
+    result = mgr.remove_profile("work")
+
+    assert result.wrapper_removed is True
+    assert result.home_removed is True
+    assert not (mgr.config.bin_dir / "codex-work").exists()
+    assert not (mgr.config.profile_root / "work").exists()
+    assert [p.name for p in mgr.list_profiles()] == ["play"]
+
+
+def test_remove_profile_keep_data_keeps_home(mgr: CodexAlias) -> None:
+    mgr.add_profile("work")
+
+    result = mgr.remove_profile("work", keep_data=True)
+
+    assert result.wrapper_removed is True
+    assert result.home_removed is False
+    assert not (mgr.config.bin_dir / "codex-work").exists()
+    assert (mgr.config.profile_root / "work").is_dir()
+
+
+def test_remove_profile_without_wrapper_still_removes_home(mgr: CodexAlias) -> None:
+    mgr.add_profile("work")
+    (mgr.config.bin_dir / "codex-work").unlink()
+
+    result = mgr.remove_profile("work")
+
+    assert result.wrapper_removed is False
+    assert result.home_removed is True
+    assert not (mgr.config.profile_root / "work").exists()
+
+
+def test_remove_profile_removes_custom_command(mgr: CodexAlias) -> None:
+    mgr.add_profile("work", "codex-w")
+    (mgr.config.profile_root / "work" / "data.txt").write_text("x")
+
+    result = mgr.remove_profile("work", "codex-w")
+
+    assert result.wrapper_path == mgr.config.bin_dir / "codex-w"
+    assert result.wrapper_removed is True
+    assert result.home_removed is True
+
+
+def test_remove_profile_refuses_source_home(mgr: CodexAlias) -> None:
+    mgr.config.source_home.mkdir(parents=True, exist_ok=True)
+    (mgr.config.profile_root / "work").mkdir(parents=True, exist_ok=True)
+    (mgr.config.profile_root / "work" / "config.toml").write_text("x")
+    # Simulate a profile whose path is the configured source home.
+    source = mgr.config.source_home
+    cfg = Config(
+        profile_root=source.parent,
+        bin_dir=mgr.config.bin_dir,
+        codex_cmd="codex",
+        source_home=source,
+        manager_bin_name="codexalias",
+    )
+    with pytest.raises(CodexAliasError, match="source home"):
+        CodexAlias(cfg).remove_profile(source.name)
+
+
+def test_remove_profile_refuses_current_home(mgr: CodexAlias, monkeypatch) -> None:
+    mgr.add_profile("work")
+    monkeypatch.setenv("CODEX_HOME", str(mgr.config.profile_root / "work"))
+
+    with pytest.raises(CodexAliasError, match="CODEX_HOME"):
+        mgr.remove_profile("work")
+
+
+def test_remove_profile_missing_home_raises(mgr: CodexAlias) -> None:
+    with pytest.raises(ProfileNotFoundError):
+        mgr.remove_profile("work")
 
 
 def test_run_argv_sets_isolated_home(mgr: CodexAlias) -> None:

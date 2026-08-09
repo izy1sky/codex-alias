@@ -234,14 +234,47 @@ def path(ctx: click.Context, profile: str) -> None:
 @cli.command()
 @click.argument("profile")
 @click.argument("command_name", required=False)
+@click.option(
+    "--keep-data",
+    is_flag=True,
+    help="Remove only the wrapper command; keep the profile home and data.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip the confirmation before deleting profile data.",
+)
 @click.pass_context
-def remove(ctx: click.Context, profile: str, command_name: str | None) -> None:
-    """Remove a wrapper command (profile data is kept)."""
-    target, removed = _mgr(ctx).remove_wrapper(profile, command_name)
-    if removed:
-        ui.success(f"Removed wrapper: {target}")
+def remove(
+    ctx: click.Context,
+    profile: str,
+    command_name: str | None,
+    keep_data: bool,
+    yes: bool,
+) -> None:
+    """Remove PROFILE and its wrapper command (profile data is deleted)."""
+    mgr = _mgr(ctx)
+    profile_path = mgr.profile_home(profile, must_exist=False)
+    if not keep_data and profile_path.is_dir() and not yes:
+        if not sys.stdin.isatty():
+            raise click.ClickException(
+                "removing a profile deletes its data; pass --yes to confirm "
+                "in a non-interactive shell"
+            )
+        if not ui.confirm(f"Delete profile data at {profile_path}?", default=False):
+            ui.warn("Aborted; profile kept.")
+            return
+
+    result = mgr.remove_profile(profile, command_name, keep_data=keep_data)
+    if result.wrapper_removed:
+        ui.success(f"Removed wrapper: {result.wrapper_path}")
     else:
-        ui.warn(f"Wrapper not found: {target}")
+        ui.warn(f"Wrapper not found: {result.wrapper_path}")
+    if result.home_removed:
+        ui.success(f"Removed profile home: {result.profile_path}")
+    elif keep_data:
+        ui.info(f"Profile data kept: {result.profile_path}")
 
 
 @cli.command(name="refresh-wrappers")

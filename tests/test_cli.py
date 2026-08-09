@@ -61,6 +61,52 @@ def test_run_help_before_profile_still_shows_manager_help() -> None:
     assert "Run codex once under PROFILE" in result.output
 
 
+def _env(tmp_path) -> dict[str, str]:
+    return {
+        "HOME": str(tmp_path),
+        "CODEXALIAS_SOURCE_HOME": str(tmp_path / ".codex"),
+        "CODEXALIAS_PROFILE_ROOT": str(tmp_path / "profiles"),
+        "CODEXALIAS_BIN_DIR": str(tmp_path / "bin"),
+    }
+
+
+def test_remove_deletes_profile_with_yes(tmp_path) -> None:
+    env = _env(tmp_path)
+    CliRunner().invoke(cli, ["add", "work", "--no-bootstrap"], env=env)
+
+    result = CliRunner().invoke(cli, ["remove", "work", "--yes"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert "Removed wrapper" in result.output
+    assert "Removed profile home" in result.output
+    assert not (tmp_path / "profiles" / "work").exists()
+    assert not (tmp_path / "bin" / "codex-work").exists()
+
+
+def test_remove_keep_data_keeps_profile_home(tmp_path) -> None:
+    env = _env(tmp_path)
+    CliRunner().invoke(cli, ["add", "work", "--no-bootstrap"], env=env)
+
+    result = CliRunner().invoke(cli, ["remove", "work", "--keep-data"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert "Removed wrapper" in result.output
+    assert "Profile data kept" in result.output
+    assert (tmp_path / "profiles" / "work").is_dir()
+    assert not (tmp_path / "bin" / "codex-work").exists()
+
+
+def test_remove_without_yes_requires_confirmation_non_interactive(tmp_path) -> None:
+    env = _env(tmp_path)
+    CliRunner().invoke(cli, ["add", "work", "--no-bootstrap"], env=env)
+
+    result = CliRunner().invoke(cli, ["remove", "work"], env=env)
+
+    assert result.exit_code != 0
+    assert "--yes" in result.output
+    assert (tmp_path / "profiles" / "work").is_dir()
+
+
 def test_resume_can_fix_provider_and_model_before_launch(
     monkeypatch, tmp_path
 ) -> None:

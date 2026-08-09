@@ -81,8 +81,11 @@ codexalias list
 # Print the absolute home path of a profile
 codexalias path <profile>
 
-# Remove a wrapper command (profile data is kept)
+# Remove a profile: its wrapper command and profile data
 codexalias remove <profile> [command-name]
+
+# Keep the profile data and remove only the wrapper command
+codexalias remove <profile> [command-name] --keep-data
 
 # Environment and sanity checks
 codexalias doctor
@@ -91,6 +94,12 @@ codexalias doctor
 `@source` refers to the configured source home; `@current` refers to the current
 `CODEX_HOME` (falling back to the source home when unset). A bare profile name or
 an absolute path also works anywhere a home is expected.
+
+`remove` prompts for confirmation before deleting a profile home (auth, config,
+sessions, and everything else under the profile). Pass `--yes` to skip the
+prompt or `--keep-data` to keep the home and only remove the wrapper. Deleting a
+profile that is the configured source home or the current `CODEX_HOME` is
+refused.
 
 By default, profile commands resolve `codex` through the user's login shell, as
 if `codex ...` had been entered directly. This preserves fish/bash/zsh functions

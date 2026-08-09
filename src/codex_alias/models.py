@@ -45,6 +45,17 @@ class Profile:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileRemoveResult:
+    """Outcome of removing a profile wrapper and (optionally) its home."""
+
+    profile: str
+    profile_path: Path
+    wrapper_path: Path
+    wrapper_removed: bool
+    home_removed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SessionFile:
     """A single Codex session record on disk."""
 

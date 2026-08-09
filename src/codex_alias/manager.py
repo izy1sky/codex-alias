@@ -18,6 +18,7 @@ from pathlib import Path
 from .config import Config
 from .errors import (
     AmbiguousSessionError,
+    CodexAliasError,
     HomeNotFoundError,
     InvalidNameError,
     ProfileNotFoundError,
@@ -29,6 +30,7 @@ from .models import (
     HomeRef,
     LinkAction,
     Profile,
+    ProfileRemoveResult,
     SessionCopyResult,
     SessionCloneResult,
     SessionFile,
@@ -150,6 +152,67 @@ class CodexAlias:
             target.unlink()
             return target, True
         return target, False
+
+    def remove_profile(
+        self,
+        profile: str,
+        command_name: str | None = None,
+        *,
+        keep_data: bool = False,
+    ) -> ProfileRemoveResult:
+        """Remove a profile: its wrapper command and, unless ``keep_data``, its home.
+
+        Deleting a home is refused when it is the configured source home or the
+        current ``CODEX_HOME``, since removing either would break the tool.
+        """
+        validate_name(profile, "profile")
+        command_name = command_name or f"codex-{profile}"
+        validate_name(command_name, "command name")
+
+        profile_path = self.config.profile_path(profile)
+        if not keep_data:
+            if not profile_path.is_dir():
+                raise ProfileNotFoundError(f"profile not found: {profile_path}")
+            resolved = self._safe_resolve(profile_path)
+            if resolved == self._safe_resolve(self.config.source_home):
+                raise CodexAliasError(
+                    f"refusing to remove {profile_path}: it is the configured source home"
+                )
+            if resolved == self._safe_resolve(self.current_home()):
+                raise CodexAliasError(
+                    f"refusing to remove {profile_path}: it is the current CODEX_HOME"
+                )
+
+        wrapper_path = self.config.wrapper_path(command_name)
+        wrapper_removed = False
+        if wrapper_path.exists():
+            wrapper_path.unlink()
+            wrapper_removed = True
+
+        home_removed = False
+        if not keep_data:
+            home_removed = self._remove_home(profile_path)
+
+        return ProfileRemoveResult(
+            profile=profile,
+            profile_path=profile_path,
+            wrapper_path=wrapper_path,
+            wrapper_removed=wrapper_removed,
+            home_removed=home_removed,
+        )
+
+    def _remove_home(self, profile_path: Path) -> bool:
+        """Delete a profile home after verifying it lives under the profile root."""
+        root = self._safe_resolve(self.config.profile_root)
+        if root not in self._safe_resolve(profile_path).parents:
+            raise CodexAliasError(f"refusing to remove path outside profile root: {profile_path}")
+        if profile_path.is_symlink():
+            profile_path.unlink()
+            return True
+        if not profile_path.is_dir():
+            return False
+        shutil.rmtree(profile_path)
+        return True
 
     def run_argv(self, profile: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         """Build the argv and environment to exec ``codex`` under ``profile``.
