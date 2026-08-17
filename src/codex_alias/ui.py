@@ -335,19 +335,31 @@ def _render_hook_picker(
     heading(f"Root hooks -> {profile}")
     console.print(f"[dim]Source: {source_path}[/]")
     table = Table(show_header=True, expand=True, box=None, pad_edge=False)
-    table.add_column("", width=3, no_wrap=True)
-    table.add_column("Source", style="yellow", no_wrap=True)
-    table.add_column("Event", style="cyan", no_wrap=True)
-    table.add_column("Matcher", style="magenta", no_wrap=True)
-    table.add_column("Type", style="green", no_wrap=True)
+    # Keep the selection column visible on narrow terminals.  Rich will
+    # shrink all columns as a last resort when their measured widths don't
+    # fit; with every metadata column set to ``no_wrap`` that used to squeeze
+    # this column down to an ellipsis, hiding the checkbox entirely.  Keep
+    # metadata columns flexible so they absorb the compression first.
+    table.add_column("", width=5, no_wrap=True, overflow="crop")
+    table.add_column("Source", max_width=18, style="yellow", overflow="ellipsis")
+    table.add_column("Event", max_width=14, style="cyan", overflow="ellipsis")
     table.add_column(
-        "Command / prompt", overflow="ellipsis", no_wrap=True, max_width=96
+        "Matcher", max_width=16, style="magenta", overflow="ellipsis"
+    )
+    table.add_column("Type", max_width=9, style="green", overflow="ellipsis")
+    table.add_column(
+        "Command / prompt", ratio=1, overflow="ellipsis", no_wrap=True, max_width=96
     )
     for index, option in enumerate(options):
-        marker = "[bold green]x[/]" if option.key in selected else " "
         pointer = ">" if index == cursor else " "
+        marker = "[x]" if option.key in selected else "[ ]"
+        marker_style = "bold green" if option.key in selected else "dim"
+        selection = Text()
+        selection.append(pointer)
+        selection.append(" ")
+        selection.append(marker, style=marker_style)
         table.add_row(
-            f"{pointer}{marker}",
+            selection,
             option.source,
             option.event,
             option.matcher,

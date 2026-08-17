@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from rich.console import Console
 
-from codex_alias import CodexAlias, HookConfigError
+from codex_alias import CodexAlias, HookConfigError, HookOption
 from codex_alias.cli import cli
 from codex_alias import ui
 
@@ -265,3 +267,39 @@ def test_hook_picker_keeps_bare_escape_as_cancel(monkeypatch) -> None:
     monkeypatch.setattr(ui.select, "select", lambda *args: ([], [], []))
 
     assert ui._read_key() == "cancel"
+
+
+def test_hook_picker_keeps_checkbox_visible_on_narrow_terminal(monkeypatch) -> None:
+    options = [
+        HookOption(
+            key="selected",
+            event="SessionStart",
+            matcher="startup|resume",
+            hook_type="command",
+            detail="PLUGIN_ROOT=/a/very/long/plugin/path/scripts/hook.sh",
+            source="agent-trace@ai-minions-skills",
+            selected=True,
+        ),
+        HookOption(
+            key="unselected",
+            event="UserPromptSubmit",
+            matcher="*",
+            hook_type="command",
+            detail="bash /a/very/long/path/hook.sh",
+            selected=False,
+        ),
+    ]
+    rendered_console = Console(width=60, record=True, force_terminal=False)
+    monkeypatch.setattr(ui, "console", rendered_console)
+
+    ui._render_hook_picker(
+        "work",
+        Path("/tmp/root/hooks.json"),
+        options,
+        {"selected"},
+        0,
+    )
+
+    rendered = rendered_console.export_text(styles=False)
+    assert "> [x]" in rendered
+    assert "  [ ]" in rendered
