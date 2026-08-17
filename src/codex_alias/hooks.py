@@ -323,8 +323,19 @@ def _apply_selection(
         applied = {}
 
     removed = 0
-    for snapshot in applied.values():
+    retained_owned: set[str] = set()
+    for key, snapshot in applied.items():
         if not isinstance(snapshot, dict) or not snapshot.get("owned", False):
+            continue
+        source_hook = source_by_key.get(key)
+        if (
+            key in selected
+            and source_hook is not None
+            and snapshot.get("event") == source_hook.event
+            and snapshot.get("matcher") == source_hook.matcher
+            and snapshot.get("hook") == source_hook.hook
+        ):
+            retained_owned.add(key)
             continue
         if _remove_snapshot(target_document, snapshot):
             removed += 1
@@ -340,7 +351,7 @@ def _apply_selection(
             added += 1
             owned = True
         else:
-            owned = False
+            owned = item.key in retained_owned
         next_applied[item.key] = {
             "event": item.event,
             "matcher": copy.deepcopy(item.matcher),

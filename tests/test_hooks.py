@@ -169,6 +169,22 @@ def test_profile_hook_sync_replaces_changed_root_hook(mgr: CodexAlias) -> None:
     assert "root-start-v2" in commands
 
 
+def test_reapplying_the_same_hook_selection_is_idempotent(mgr: CodexAlias) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    mgr.add_profile("work")
+    options = mgr.profile_hook_options("work")
+    selected = {options[0].key}
+
+    mgr.configure_profile_hooks("work", selected)
+    result = mgr.configure_profile_hooks("work", selected)
+
+    assert result.added == 0
+    assert result.removed == 0
+    assert result.changed is False
+    assert result.backup_path is None
+
+
 def test_deselecting_hooks_removes_only_owned_entries(mgr: CodexAlias) -> None:
     root = mgr.default_source_home()
     _write_hooks(root, _root_hooks())
