@@ -431,6 +431,51 @@ def test_clone_session_for_profile_uses_new_id_and_preserves_source(
         ).fetchone() == ("cpa",)
 
 
+def test_clone_session_preserves_unicode_line_separators_in_json_strings(
+    mgr: CodexAlias, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = mgr.config.source_home
+    source_path = write_session(
+        source,
+        SID_A,
+        content=(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": SID_A, "model_provider": "custom"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"text": "before\u0085after"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        ),
+    )
+    original = source_path.read_bytes()
+    monkeypatch.setenv("HOME", str(source.parent))
+    (source.parent / ".codex").symlink_to(source, target_is_directory=True)
+
+    target = mgr.config.profile_path("fenno")
+    target.mkdir(parents=True)
+    (target / "config.toml").write_text('model_provider = "fenno"\n')
+
+    result = mgr.clone_session_for_profile(SID_A, target)
+
+    assert source_path.read_bytes() == original
+    records = [
+        json.loads(line)
+        for line in result.path.read_text(encoding="utf-8").split("\n")
+        if line
+    ]
+    assert records[1]["payload"]["text"] == "before\u0085after"
+
+
 def test_clone_session_works_when_target_storage_is_shared(
     mgr: CodexAlias, monkeypatch: pytest.MonkeyPatch
 ) -> None:

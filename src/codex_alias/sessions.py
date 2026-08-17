@@ -50,6 +50,22 @@ _UUID_RE = re.compile(
 )
 
 
+def _split_jsonl(text: str, *, keepends: bool = False) -> list[str]:
+    """Split JSONL only at LF, so Unicode line separators stay in strings."""
+    parts = text.split("\n")
+    has_trailing_lf = parts[-1] == ""
+    if has_trailing_lf:
+        parts.pop()
+
+    if not keepends:
+        return [part[:-1] if part.endswith("\r") else part for part in parts]
+    if not parts:
+        return []
+    if has_trailing_lf:
+        return [f"{part}\n" for part in parts]
+    return [f"{part}\n" for part in parts[:-1]] + [parts[-1]]
+
+
 def session_id_from_path(path: Path) -> str | None:
     """Extract a trailing UUID session id from a ``*.jsonl`` filename."""
     match = _UUID_RE.search(path.stem)
@@ -135,7 +151,7 @@ def _append_history(src_home: Path, dst_home: Path, session_id: str) -> None:
     needle = f'"session_id":"{session_id}"'
     new_lines = [
         line
-        for line in src_history.read_text(encoding="utf-8").splitlines()
+        for line in _split_jsonl(src_history.read_text(encoding="utf-8"))
         if line and needle in line
     ]
     if not new_lines:
@@ -145,7 +161,7 @@ def _append_history(src_home: Path, dst_home: Path, session_id: str) -> None:
     dst_history = dst_home / "history.jsonl"
     existing = set()
     if dst_history.is_file():
-        existing = set(dst_history.read_text(encoding="utf-8").splitlines())
+        existing = set(_split_jsonl(dst_history.read_text(encoding="utf-8")))
 
     to_add = [line for line in new_lines if line not in existing]
     if not to_add:
@@ -296,7 +312,7 @@ def inspect_session_source(
     model: str | None = None
     cli_version: str | None = None
     try:
-        lines = session.path.read_text(encoding="utf-8").splitlines()
+        lines = _split_jsonl(session.path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError) as exc:
         raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
     for line_number, line in enumerate(lines, start=1):
@@ -408,7 +424,9 @@ def fix_session_provider(
 
     try:
         path = session.path.resolve(strict=True)
-        original_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        original_lines = _split_jsonl(
+            path.read_text(encoding="utf-8"), keepends=True
+        )
     except (OSError, UnicodeError) as exc:
         raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
 
@@ -640,7 +658,9 @@ def _clone_jsonl(
 ) -> tuple[Path, SessionMappingResult]:
     """Create a validated session copy with a new identity and provider."""
     try:
-        lines = session.path.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = _split_jsonl(
+            session.path.read_text(encoding="utf-8"), keepends=True
+        )
     except (OSError, UnicodeError) as exc:
         raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
 
@@ -726,7 +746,7 @@ def _clone_history(
     if not src_history.is_file():
         return
     additions: list[str] = []
-    for line in src_history.read_text(encoding="utf-8").splitlines():
+    for line in _split_jsonl(src_history.read_text(encoding="utf-8")):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
