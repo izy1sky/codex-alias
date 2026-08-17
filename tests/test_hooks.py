@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from codex_alias import CodexAlias, HookConfigError
 from codex_alias.cli import cli
+from codex_alias import ui
 
 
 def _write_hooks(home, document: dict) -> None:
@@ -167,3 +168,28 @@ def test_sync_command_applies_saved_hooks(tmp_path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert _read_hooks(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "root-start"
+
+
+def test_hook_picker_reads_split_arrow_sequences_without_text_buffering(monkeypatch) -> None:
+    class FakeStdin:
+        def fileno(self) -> int:
+            return 41
+
+    chunks = iter((b"\x1b", b"[", b"B"))
+    monkeypatch.setattr(ui.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(ui.os, "read", lambda fd, size: next(chunks))
+    monkeypatch.setattr(ui.select, "select", lambda *args: ([41], [], []))
+
+    assert ui._read_key() == "down"
+
+
+def test_hook_picker_keeps_bare_escape_as_cancel(monkeypatch) -> None:
+    class FakeStdin:
+        def fileno(self) -> int:
+            return 41
+
+    monkeypatch.setattr(ui.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(ui.os, "read", lambda fd, size: b"\x1b")
+    monkeypatch.setattr(ui.select, "select", lambda *args: ([], [], []))
+
+    assert ui._read_key() == "cancel"

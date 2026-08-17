@@ -7,8 +7,10 @@ filesystem logic; it only formats value objects and reads user input.
 
 from __future__ import annotations
 
+import os
 import select
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -252,38 +254,74 @@ def _raw_key_mode() -> Iterator[None]:
         termios.tcsetattr(fd, termios.TCSADRAIN, original)
 
 
+_ESCAPE_SEQUENCE_TIMEOUT = 0.1
+
+
+def _escape_sequence_key(sequence: bytes) -> str | None:
+    direct = {
+        b"\x1b[A": "up",
+        b"\x1b[B": "down",
+        b"\x1b[C": "right",
+        b"\x1b[D": "left",
+        b"\x1bOA": "up",
+        b"\x1bOB": "down",
+        b"\x1bOC": "right",
+        b"\x1bOD": "left",
+    }
+    if sequence in direct:
+        return direct[sequence]
+    if sequence.startswith((b"\x1b[", b"\x1bO")) and sequence[-1:] in b"ABCD":
+        return {
+            b"A": "up",
+            b"B": "down",
+            b"C": "right",
+            b"D": "left",
+        }[sequence[-1:]]
+    return None
+
+
 def _read_key() -> str:
-    key = sys.stdin.read(1)
-    if key in ("\r", "\n"):
+    fd = sys.stdin.fileno()
+    # TextIOWrapper may buffer the rest of an escape sequence after ESC.
+    # Reading the fd directly keeps select() and the bytes in sync.
+    key = os.read(fd, 1)
+    if key in (b"\r", b"\n"):
         return "confirm"
-    if key == " ":
+    if key == b" ":
         return "toggle"
-    if key in ("q", "Q", "\x03"):
+    if key in (b"q", b"Q", b"\x03"):
         return "cancel"
-    if key in ("j", "J"):
+    if key in (b"j", b"J"):
         return "down"
-    if key in ("k", "K"):
+    if key in (b"k", b"K"):
         return "up"
-    if key == "a" or key == "A":
+    if key in (b"a", b"A"):
         return "all"
-    if key == "n" or key == "N":
+    if key in (b"n", b"N"):
         return "none"
-    if key != "\x1b":
+    if key != b"\x1b":
         return "unknown"
 
-    sequence = key
-    while select.select([sys.stdin], [], [], 0.02)[0]:
-        sequence += sys.stdin.read(1)
-        if sequence[-1].isalpha() or sequence[-1] == "~":
+    sequence = bytearray(key)
+    deadline = time.monotonic() + _ESCAPE_SEQUENCE_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             break
-    if sequence == "\x1b":
+        if not select.select([fd], [], [], remaining)[0]:
+            break
+        chunk = os.read(fd, 1)
+        if not chunk:
+            break
+        sequence.extend(chunk)
+        parsed = _escape_sequence_key(bytes(sequence))
+        if parsed is not None:
+            return parsed
+        if sequence[-1:] in b"~ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            break
+    if bytes(sequence) == b"\x1b":
         return "cancel"
-    return {
-        "\x1b[A": "up",
-        "\x1b[B": "down",
-        "\x1b[C": "right",
-        "\x1b[D": "left",
-    }.get(sequence, "unknown")
+    return "unknown"
 
 
 def _render_hook_picker(
