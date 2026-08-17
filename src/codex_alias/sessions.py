@@ -7,6 +7,7 @@ any user interaction; the CLI drives selection/prompting on top.
 
 from __future__ import annotations
 
+import copy
 import filecmp
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import tomllib
@@ -36,6 +38,11 @@ from .models import (
     SessionCopyResult,
     SessionFile,
     SessionFixResult,
+)
+from .session_mappings import (
+    SessionMappingContext,
+    SessionMappingResult,
+    apply_session_mappings,
 )
 
 _UUID_RE = re.compile(
@@ -225,6 +232,107 @@ def configured_model(home: Path) -> str:
     return model.strip()
 
 
+def configured_model_or_none(home: Path) -> str | None:
+    """Read the configured model, allowing Codex to use its default."""
+    config_path = home / "config.toml"
+    data = _read_config(home)
+    model = data.get("model")
+    if model is None:
+        return None
+    if not isinstance(model, str) or not model.strip():
+        raise SessionRepairError(
+            f"invalid top-level model in config: {config_path}"
+        )
+    return model.strip()
+
+
+def configured_backend_identity(
+    home: Path, provider: str
+) -> tuple[str, str | None] | None:
+    """Return a stable wire-API/base-URL identity for a provider alias.
+
+    Provider names are intentionally excluded: two aliases pointing at the
+    same URL and wire API are the same encryption boundary for our purposes.
+    Missing definitions stay unknown instead of being guessed.
+    """
+    try:
+        data = _read_config(home)
+    except SessionRepairError:
+        return None
+    providers = data.get("model_providers")
+    if not isinstance(providers, dict):
+        return None
+    definition = providers.get(provider)
+    if not isinstance(definition, dict):
+        return None
+    base_url = definition.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+    wire_api = definition.get("wire_api", "responses")
+    if not isinstance(wire_api, str) or not wire_api.strip():
+        return None
+
+    parts = urlsplit(base_url.strip())
+    if not parts.scheme or not parts.netloc:
+        return None
+    normalized_url = urlunsplit(
+        (
+            parts.scheme.casefold(),
+            parts.netloc.casefold(),
+            parts.path.rstrip("/"),
+            parts.query,
+            "",
+        )
+    )
+    normalized_wire = wire_api.strip().casefold()
+    return f"{normalized_wire}|{normalized_url}", normalized_wire
+
+
+def inspect_session_source(
+    session: SessionFile,
+) -> tuple[str | None, str | None, str | None]:
+    """Read source provider, latest model, and CLI version from a rollout."""
+    provider: str | None = None
+    model: str | None = None
+    cli_version: str | None = None
+    try:
+        lines = session.path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SessionRepairError(
+                f"invalid JSONL record at {session.path}:{line_number}: {exc.msg}"
+            ) from exc
+        if not isinstance(record, dict):
+            raise SessionRepairError(
+                f"invalid non-object JSONL record at {session.path}:{line_number}"
+            )
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if record.get("type") == "session_meta":
+            value = payload.get("model_provider")
+            if isinstance(value, str) and value.strip():
+                provider = value.strip()
+            value = payload.get("cli_version")
+            if isinstance(value, str) and value.strip():
+                cli_version = value.strip()
+        if record.get("type") == "turn_context":
+            value = payload.get("model")
+            if isinstance(value, str) and value.strip():
+                model = value.strip()
+        if record.get("type") == "event_msg":
+            settings = payload.get("thread_settings")
+            if isinstance(settings, dict):
+                value = settings.get("model")
+                if isinstance(value, str) and value.strip():
+                    model = value.strip()
+    return provider, model, cli_version
+
+
 def _next_backup_path(path: Path) -> Path:
     number = 1
     while True:
@@ -276,14 +384,15 @@ def fix_session_provider(
     model: str | None = None,
     from_provider: str | None = None,
     dry_run: bool = False,
+    mapping_context: SessionMappingContext | None = None,
 ) -> SessionFixResult:
     """Normalize persisted provider and model metadata in a Codex session.
 
     Every JSONL record is parsed before any write occurs. On a real repair the
     original is copied to a unique sibling backup and the replacement is
     written atomically. Only the two provider fields used by Codex session
-    bootstrap and the thread model are changed; conversation payloads are left
-    untouched.
+    bootstrap and the thread model are changed. Registered provider mappings
+    may also normalize response items that the target model/API cannot replay.
     """
     provider = provider.strip()
     if not provider:
@@ -303,10 +412,11 @@ def fix_session_provider(
     except (OSError, UnicodeError) as exc:
         raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
 
-    rewritten: list[str] = []
+    records: list[dict[str, object]] = []
+    newlines: list[str] = []
+    original_records: list[dict[str, object]] = []
     previous: set[str] = set()
     previous_models: set[str] = set()
-    changed_records = 0
     changed_fields = 0
     changed_model_fields = 0
 
@@ -328,17 +438,17 @@ def fix_session_provider(
                 f"invalid non-object JSONL record at {path}:{line_number}"
             )
 
-        fields_in_record = 0
-        model_fields_in_record = 0
+        original_records.append(copy.deepcopy(record))
+        newlines.append(newline)
         payload = record.get("payload")
         if record.get("type") == "session_meta":
-            fields_in_record += int(
+            changed_fields += int(
                 _replace_provider_field(
                     payload, "model_provider", provider, from_provider, previous
                 )
             )
         if record.get("type") == "event_msg" and isinstance(payload, dict):
-            fields_in_record += int(
+            changed_fields += int(
                 _replace_provider_field(
                     payload.get("thread_settings"),
                     "model_provider_id",
@@ -348,16 +458,36 @@ def fix_session_provider(
                 )
             )
             if model is not None:
-                model_fields_in_record += int(
+                changed_model_fields += int(
                     _replace_model_field(
                         payload.get("thread_settings"), model, previous_models
                     )
                 )
+        records.append(record)
 
-        if fields_in_record or model_fields_in_record:
+    if mapping_context is None:
+        mapping_context = SessionMappingContext(
+            source_model=None,
+            target_model=model,
+            source_provider=None,
+            target_provider=provider,
+        )
+    mapping_result = apply_session_mappings(records, mapping_context)
+    if mapping_result.blockers:
+        details = "; ".join(mapping_result.blockers)
+        raise SessionRepairError(f"session mapping blocked: {details}")
+
+    kept_ids = {id(record) for record in mapping_result.records}
+    changed_records = 0
+    rewritten: list[str] = []
+    for record, original, line, newline in zip(
+        records, original_records, original_lines, newlines, strict=True
+    ):
+        if id(record) not in kept_ids:
             changed_records += 1
-            changed_fields += fields_in_record
-            changed_model_fields += model_fields_in_record
+            continue
+        if record != original:
+            changed_records += 1
             rewritten.append(
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")) + newline
             )
@@ -365,7 +495,7 @@ def fix_session_provider(
             rewritten.append(line)
 
     backup_path: Path | None = None
-    if (changed_fields or changed_model_fields) and not dry_run:
+    if changed_records and not dry_run:
         backup_path = _next_backup_path(path)
         try:
             shutil.copy2(path, backup_path)
@@ -400,6 +530,11 @@ def fix_session_provider(
         model=model,
         previous_models=tuple(sorted(previous_models)),
         changed_model_fields=changed_model_fields,
+        mapped_records=mapping_result.mapped_records,
+        applied_mappings=mapping_result.applied_mappings,
+        dropped_records=mapping_result.dropped_records,
+        lossy_mappings=mapping_result.lossy_mappings,
+        mapping_warnings=mapping_result.warnings,
     )
 
 
@@ -496,15 +631,21 @@ def fix_session_state_provider(
 
 
 def _clone_jsonl(
-    session: SessionFile, dst_home: Path, new_id: str, provider: str
-) -> Path:
+    session: SessionFile,
+    dst_home: Path,
+    new_id: str,
+    provider: str,
+    model: str | None,
+    mapping_context: SessionMappingContext | None = None,
+) -> tuple[Path, SessionMappingResult]:
     """Create a validated session copy with a new identity and provider."""
     try:
         lines = session.path.read_text(encoding="utf-8").splitlines(keepends=True)
     except (OSError, UnicodeError) as exc:
         raise SessionRepairError(f"failed to read session {session.path}: {exc}") from exc
 
-    rewritten: list[str] = []
+    records: list[dict[str, object]] = []
+    newlines: list[str] = []
     for line_number, line in enumerate(lines, start=1):
         body = line.rstrip("\r\n")
         newline = line[len(body) :]
@@ -529,9 +670,28 @@ def _clone_jsonl(
             settings = payload.get("thread_settings")
             if isinstance(settings, dict) and "model_provider_id" in settings:
                 settings["model_provider_id"] = provider
-        rewritten.append(
-            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + newline
+        records.append(record)
+        newlines.append(newline)
+
+    if mapping_context is None:
+        mapping_context = SessionMappingContext(
+            source_model=None,
+            target_model=model,
+            source_provider=None,
+            target_provider=provider,
         )
+    mapping_result = apply_session_mappings(records, mapping_context)
+    if mapping_result.blockers:
+        details = "; ".join(mapping_result.blockers)
+        raise SessionRepairError(f"session mapping blocked: {details}")
+    newline_by_id = {
+        id(record): newline for record, newline in zip(records, newlines, strict=True)
+    }
+    rewritten = [
+        json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        + newline_by_id[id(record)]
+        for record in mapping_result.records
+    ]
 
     source_name = session.path.name
     if session.session_id not in source_name:
@@ -556,7 +716,7 @@ def _clone_jsonl(
         if temp_name:
             Path(temp_name).unlink(missing_ok=True)
         raise SessionRepairError(f"failed to clone session to {target_path}: {exc}") from exc
-    return target_path
+    return target_path, mapping_result
 
 
 def _clone_history(
@@ -643,11 +803,18 @@ def _clone_thread_state(
 
 
 def clone_session_for_profile(
-    src_home: Path, session: SessionFile, dst_home: Path, provider: str
+    src_home: Path,
+    session: SessionFile,
+    dst_home: Path,
+    provider: str,
+    model: str | None = None,
+    mapping_context: SessionMappingContext | None = None,
 ) -> SessionCloneResult:
     """Copy a session to a new ID and adapt only the copy for a provider."""
     new_id = str(uuid.uuid4())
-    target_path = _clone_jsonl(session, dst_home, new_id, provider)
+    target_path, mapping_result = _clone_jsonl(
+        session, dst_home, new_id, provider, model, mapping_context
+    )
     try:
         _clone_thread_state(
             src_home, dst_home, session.session_id, new_id, target_path, provider
@@ -662,4 +829,10 @@ def clone_session_for_profile(
         provider=provider,
         path=target_path,
         target_home=dst_home,
+        model=model,
+        mapped_records=mapping_result.mapped_records,
+        applied_mappings=mapping_result.applied_mappings,
+        dropped_records=mapping_result.dropped_records,
+        lossy_mappings=mapping_result.lossy_mappings,
+        mapping_warnings=mapping_result.warnings,
     )

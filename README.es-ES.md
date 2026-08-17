@@ -177,15 +177,30 @@ JSONL de manera atómica y actualiza condicionalmente solo la fila del hilo SQLi
 ## Reanudar con otro perfil
 
 `codexa resume <session-id>` muestra una lista numerada de Rich que contiene
-`default` y cada perfil agregado. Siempre crea un nuevo ID de sesión, copia
-el JSONL, el historial y los metadatos del hilo SQLite, cambia el proveedor solo
-en la copia e inicia Codex con el perfil seleccionado. La sesión de origen
-nunca se modifica. Esto también funciona cuando los perfiles comparten el almacenamiento de sesiones
-a través de enlaces simbólicos, ya que la sesión clonada tiene un ID distinto.
+`default` y cada perfil agregado. Después de seleccionar el perfil, puede
+reparar el proveedor y el modelo de la copia antes de iniciar Codex. La sesión
+de origen nunca se modifica. Esto también funciona cuando los perfiles
+comparten el almacenamiento mediante enlaces simbólicos, ya que la sesión
+clonada tiene un ID distinto.
 
-Use `--profile cpa` para omitir el prompt o `--no-launch` para crear la copia
-sin iniciar Codex. Los nombres de los ejecutables instalados son `codex-alias`,
-`codexa` y `codexalias`.
+La copia aplica además las reglas de compatibilidad registradas,
+independientemente de la respuesta a la pregunta de reparación. La regla actual
+para `gpt-5*` vacía el `reasoning.content` no vacío. Las reglas usan las
+capacidades del modelo y de la API, no nombres de proveedores codificados.
+
+El historial cifrado tiene un límite de portabilidad distinto. Codexalias
+compara una huella normalizada `wire_api + base_url` cuando conoce ambos lados.
+Conserva el razonamiento cifrado entre alias del mismo backend, elimina el
+razonamiento cifrado externo como una conversión con pérdida y no adivina si
+falta una huella. Una compactación cifrada externa bloquea la reparación porque
+puede ser la única copia del contexto anterior. Las llamadas de herramientas
+incompletas o huérfanas solo generan diagnósticos. Añada futuras reglas en
+`src/codex_alias/session_mappings.py` y clasifíquelas como sin pérdida o con
+pérdida.
+
+Use `--profile cpa` para omitir el selector de perfil o `--no-launch` para crear
+la copia sin iniciar Codex. Los nombres de los ejecutables instalados son
+`codex-alias`, `codexa` y `codexalias`.
 
 ## Desarrollo
 

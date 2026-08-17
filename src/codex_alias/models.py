@@ -91,6 +91,11 @@ class SessionFixResult:
     model: str | None = None
     previous_models: tuple[str, ...] = ()
     changed_model_fields: int = 0
+    mapped_records: int = 0
+    applied_mappings: tuple[str, ...] = ()
+    dropped_records: int = 0
+    lossy_mappings: tuple[str, ...] = ()
+    mapping_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,12 @@ class SessionCloneResult:
     provider: str
     path: Path
     target_home: Path
+    model: str | None = None
+    mapped_records: int = 0
+    applied_mappings: tuple[str, ...] = ()
+    dropped_records: int = 0
+    lossy_mappings: tuple[str, ...] = ()
+    mapping_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

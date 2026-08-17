@@ -202,6 +202,22 @@ existing behavior and leaves the copied model unchanged. The source session is
 never modified. This also works when profiles share session storage through
 symlinks because the cloned session has a distinct ID.
 
+The clone also applies registered response-item compatibility mappings,
+regardless of the fix prompt. The current `gpt-5*` rule clears non-empty
+plaintext `reasoning.content`; GPT-5 Responses endpoints reject that replay
+shape. Rules use model and wire-API capabilities, not hard-coded provider
+names.
+
+Encrypted history has a separate portability boundary. Codexalias compares a
+normalized `wire_api + base_url` backend fingerprint when both sides are known.
+It preserves encrypted reasoning for aliases of the same backend, drops foreign
+encrypted reasoning as an explicitly reported lossy mapping, and does not guess
+when either backend is unknown. Foreign encrypted compaction blocks the repair
+because deleting it could remove the only copy of earlier context. Incomplete
+or orphan historical tool calls are reported as diagnostics but are not changed.
+Add future rules to `src/codex_alias/session_mappings.py` and classify each one
+as lossless or lossy.
+
 Use `--profile cpa` to skip the profile picker or `--no-launch` to create the
 copy without starting Codex. The fix confirmation is still shown after the
 profile is known. The installed executable names are `codex-alias`, `codexa`,

@@ -107,7 +107,9 @@ def render_fix_result(result: SessionFixResult) -> None:
     if (
         not result.changed_fields
         and not result.changed_model_fields
+        and not result.mapped_records
         and not result.state_changed
+        and not result.mapping_warnings
     ):
         message = f"Session {result.session_id} already uses provider '{result.provider}'"
         if result.model is not None:
@@ -125,6 +127,21 @@ def render_fix_result(result: SessionFixResult) -> None:
             f"{action} {result.changed_model_fields} JSONL model field(s) in "
             f"{result.changed_records} record(s): {old_models} -> {result.model}"
         )
+    if result.mapped_records:
+        mappings = ", ".join(result.applied_mappings)
+        success(
+            f"{action} {result.mapped_records} JSONL response item(s) with "
+            f"compatibility mapping(s): {mappings}"
+        )
+    if result.dropped_records:
+        mappings = ", ".join(result.lossy_mappings)
+        drop_action = "Would drop" if result.dry_run else "Dropped"
+        warn(
+            f"LOSSY  {drop_action} {result.dropped_records} "
+            f"non-portable record(s): {mappings}"
+        )
+    for warning in result.mapping_warnings:
+        warn(f"Session history diagnostic: {warning}")
     if result.state_changed:
         state_label = "provider"
         state_target = result.provider
@@ -143,6 +160,19 @@ def render_clone_result(result: SessionCloneResult, target_label: str) -> None:
     success(f"{result.source_session_id} -> {result.session_id}")
     info(f"TARGET    {target_label}")
     info(f"PROVIDER  {result.provider}")
+    if result.model is not None:
+        info(f"MODEL     {result.model}")
+    if result.mapped_records:
+        mappings = ", ".join(result.applied_mappings)
+        info(f"MAPPED    {result.mapped_records} record(s): {mappings}")
+    if result.dropped_records:
+        mappings = ", ".join(result.lossy_mappings)
+        warn(
+            f"LOSSY     dropped {result.dropped_records} non-portable "
+            f"record(s): {mappings}"
+        )
+    for warning in result.mapping_warnings:
+        warn(f"Session history diagnostic: {warning}")
 
 
 def render_doctor(report: DoctorReport) -> None:
