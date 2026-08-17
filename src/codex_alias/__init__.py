@@ -26,6 +26,7 @@ from .errors import (
     InvalidNameError,
     ProfileNotFoundError,
     SessionConflictError,
+    SessionLossyMappingError,
     SessionNotFoundError,
     SessionRepairError,
 )
@@ -78,5 +79,6 @@ __all__ = [
     "SessionNotFoundError",
     "AmbiguousSessionError",
     "SessionConflictError",
+    "SessionLossyMappingError",
     "SessionRepairError",
 ]

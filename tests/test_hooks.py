@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from codex_alias import CodexAlias, HookConfigError, HookOption
+import codex_alias.cli as cli_module
 from codex_alias.cli import cli
 from codex_alias import ui
 
@@ -98,7 +99,7 @@ def _write_agent_trace_plugin(home) -> None:
 def test_profile_hook_selection_preserves_custom_hooks_and_persists_settings(
     mgr: CodexAlias,
 ) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     mgr.add_profile("work")
     target = mgr.config.profile_path("work")
@@ -118,12 +119,13 @@ def test_profile_hook_selection_preserves_custom_hooks_and_persists_settings(
     assert "SessionEnd" not in document["hooks"]
 
     state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["hooks"]
     assert state["sync"]["hooks"]["selected"] == [options[0].key]
     assert state["sync"]["hooks"]["applied"][options[0].key]["owned"] is True
 
 
 def test_enabled_codex_plugin_hooks_are_selectable_and_bound(mgr: CodexAlias) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     _write_agent_trace_plugin(root)
     mgr.add_profile("work")
@@ -143,8 +145,19 @@ def test_enabled_codex_plugin_hooks_are_selectable_and_bound(mgr: CodexAlias) ->
     assert "scripts/ship-transcript.sh" in command
 
 
+def test_plugin_hooks_are_selectable_without_root_hooks_file(mgr: CodexAlias) -> None:
+    root = mgr.config.source_home
+    _write_agent_trace_plugin(root)
+    mgr.add_profile("work")
+
+    options = mgr.profile_hook_options("work")
+
+    assert len(options) == 1
+    assert options[0].source == "agent-trace@ai-minions-skills"
+
+
 def test_profile_hook_sync_replaces_changed_root_hook(mgr: CodexAlias) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     mgr.add_profile("work")
     target = mgr.config.profile_path("work")
@@ -172,7 +185,7 @@ def test_profile_hook_sync_replaces_changed_root_hook(mgr: CodexAlias) -> None:
 
 
 def test_reapplying_the_same_hook_selection_is_idempotent(mgr: CodexAlias) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     mgr.add_profile("work")
     options = mgr.profile_hook_options("work")
@@ -188,7 +201,7 @@ def test_reapplying_the_same_hook_selection_is_idempotent(mgr: CodexAlias) -> No
 
 
 def test_deselecting_hooks_removes_only_owned_entries(mgr: CodexAlias) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     mgr.add_profile("work")
     target = mgr.config.profile_path("work")
@@ -205,7 +218,7 @@ def test_deselecting_hooks_removes_only_owned_entries(mgr: CodexAlias) -> None:
 
 
 def test_sync_requires_saved_profile_settings(mgr: CodexAlias) -> None:
-    root = mgr.default_source_home()
+    root = mgr.config.source_home
     _write_hooks(root, _root_hooks())
     mgr.add_profile("work")
 
@@ -232,7 +245,7 @@ def test_sync_command_applies_saved_hooks(tmp_path, monkeypatch) -> None:
 
     result = CliRunner().invoke(
         cli,
-        ["sync", "work"],
+        ["sync", "--yes", "work"],
         env={
             "HOME": str(tmp_path),
             "CODEXALIAS_SOURCE_HOME": str(source),
@@ -242,6 +255,83 @@ def test_sync_command_applies_saved_hooks(tmp_path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert _read_hooks(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "root-start"
+
+
+def test_sync_command_runs_recorded_types_in_order(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    target.mkdir(parents=True)
+    _write_hooks(source, _root_hooks())
+
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "config")
+    hooks_module.record_sync_type(target, "hooks")
+    calls: list[str] = []
+
+    def migration(name: str):
+        def run(_mgr, _profile_path):
+            calls.append(name)
+
+        return run
+
+    monkeypatch.setattr(
+        cli_module,
+        "_SYNC_MIGRATIONS",
+        {"config": migration("config"), "hooks": migration("hooks")},
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "--yes", "work"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["config", "hooks"]
+
+
+def test_sync_config_requires_confirmation_without_yes(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    target.mkdir(parents=True)
+
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "config")
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code != 0
+    assert "pass --yes" in result.output
+
+
+def test_record_sync_type_is_idempotent_and_preserves_order(mgr: CodexAlias) -> None:
+    mgr.add_profile("work")
+
+    mgr.record_profile_sync_type("work", "plugins")
+    mgr.record_profile_sync_type("work", "hooks")
+    mgr.record_profile_sync_type("work", "plugins")
+
+    state = json.loads(
+        (mgr.config.profile_path("work") / ".codexalias.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["sync"]["types"] == ["plugins", "hooks"]
 
 
 def test_hook_picker_reads_split_arrow_sequences_without_text_buffering(monkeypatch) -> None:

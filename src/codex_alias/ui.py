@@ -151,6 +151,10 @@ def render_fix_result(result: SessionFixResult) -> None:
             f"LOSSY  {drop_action} {result.dropped_records} "
             f"non-portable record(s): {mappings}"
         )
+    elif result.lossy_mappings:
+        mappings = ", ".join(result.lossy_mappings)
+        clear_action = "Would clear" if result.dry_run else "Cleared"
+        warn(f"LOSSY  {clear_action} backend-bound fields: {mappings}")
     for warning in result.mapping_warnings:
         warn(f"Session history diagnostic: {warning}")
     if result.state_changed:
@@ -182,6 +186,9 @@ def render_clone_result(result: SessionCloneResult, target_label: str) -> None:
             f"LOSSY     dropped {result.dropped_records} non-portable "
             f"record(s): {mappings}"
         )
+    elif result.lossy_mappings:
+        mappings = ", ".join(result.lossy_mappings)
+        warn(f"LOSSY     cleared backend-bound fields: {mappings}")
     for warning in result.mapping_warnings:
         warn(f"Session history diagnostic: {warning}")
 

@@ -29,6 +29,7 @@ from .errors import (
     AmbiguousSessionError,
     HomeNotFoundError,
     SessionConflictError,
+    SessionLossyMappingError,
     SessionNotFoundError,
     SessionRepairError,
 )
@@ -64,6 +65,46 @@ def _split_jsonl(text: str, *, keepends: bool = False) -> list[str]:
     if has_trailing_lf:
         return [f"{part}\n" for part in parts]
     return [f"{part}\n" for part in parts[:-1]] + [parts[-1]]
+
+
+def _normalize_paginated_ordinals(records: list[dict[str, object]]) -> None:
+    """Restore the contiguous ordinal invariant of paginated rollouts.
+
+    Codex uses the top-level ``ordinal`` as the cursor for paginated history.
+    Any mapping that removes a record must therefore renumber the remaining
+    records before they are persisted.  Non-paginated and legacy rollouts are
+    left untouched because they do not use this cursor contract.
+    """
+    paginated = False
+    for record in records:
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict) and payload.get("history_mode") == "paginated":
+            paginated = True
+            break
+    if not paginated:
+        return
+    for ordinal, record in enumerate(records):
+        if record.get("ordinal") != ordinal:
+            record["ordinal"] = ordinal
+
+
+def _rewrite_session_references(
+    record: dict[str, object], old_id: str, new_id: str
+) -> None:
+    """Rewrite only the session/thread fields in their Codex record positions."""
+    record_type = record.get("type")
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return
+
+    if record_type == "session_meta":
+        for key in ("id", "session_id"):
+            if payload.get(key) == old_id:
+                payload[key] = new_id
+    elif record_type == "event_msg" and payload.get("thread_id") == old_id:
+        payload["thread_id"] = new_id
 
 
 def session_id_from_path(path: Path) -> str | None:
@@ -401,6 +442,7 @@ def fix_session_provider(
     from_provider: str | None = None,
     dry_run: bool = False,
     mapping_context: SessionMappingContext | None = None,
+    allow_lossy: bool = True,
 ) -> SessionFixResult:
     """Normalize persisted provider and model metadata in a Codex session.
 
@@ -494,6 +536,13 @@ def fix_session_provider(
     if mapping_result.blockers:
         details = "; ".join(mapping_result.blockers)
         raise SessionRepairError(f"session mapping blocked: {details}")
+    if mapping_result.lossy_mappings and not allow_lossy:
+        raise SessionLossyMappingError(
+            mapping_result.lossy_mappings,
+            mapping_result.mapped_records,
+            mapping_result.dropped_records,
+        )
+    _normalize_paginated_ordinals(list(mapping_result.records))
 
     kept_ids = {id(record) for record in mapping_result.records}
     changed_records = 0
@@ -655,6 +704,7 @@ def _clone_jsonl(
     provider: str,
     model: str | None,
     mapping_context: SessionMappingContext | None = None,
+    allow_lossy: bool = True,
 ) -> tuple[Path, SessionMappingResult]:
     """Create a validated session copy with a new identity and provider."""
     try:
@@ -679,12 +729,9 @@ def _clone_jsonl(
             raise SessionRepairError(
                 f"invalid non-object JSONL record at {session.path}:{line_number}"
             )
+        _rewrite_session_references(record, session.session_id, new_id)
         payload = record.get("payload")
         if record.get("type") == "session_meta" and isinstance(payload, dict):
-            if payload.get("id") == session.session_id:
-                payload["id"] = new_id
-            if payload.get("session_id") == session.session_id:
-                payload["session_id"] = new_id
             payload["model_provider"] = provider
         if record.get("type") == "event_msg" and isinstance(payload, dict):
             settings = payload.get("thread_settings")
@@ -704,6 +751,13 @@ def _clone_jsonl(
     if mapping_result.blockers:
         details = "; ".join(mapping_result.blockers)
         raise SessionRepairError(f"session mapping blocked: {details}")
+    if mapping_result.lossy_mappings and not allow_lossy:
+        raise SessionLossyMappingError(
+            mapping_result.lossy_mappings,
+            mapping_result.mapped_records,
+            mapping_result.dropped_records,
+        )
+    _normalize_paginated_ordinals(list(mapping_result.records))
     newline_by_id = {
         id(record): newline for record, newline in zip(records, newlines, strict=True)
     }
@@ -829,11 +883,18 @@ def clone_session_for_profile(
     provider: str,
     model: str | None = None,
     mapping_context: SessionMappingContext | None = None,
+    allow_lossy: bool = True,
 ) -> SessionCloneResult:
     """Copy a session to a new ID and adapt only the copy for a provider."""
     new_id = str(uuid.uuid4())
     target_path, mapping_result = _clone_jsonl(
-        session, dst_home, new_id, provider, model, mapping_context
+        session,
+        dst_home,
+        new_id,
+        provider,
+        model,
+        mapping_context,
+        allow_lossy,
     )
     try:
         _clone_thread_state(

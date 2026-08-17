@@ -15,11 +15,22 @@ import click
 
 from . import __version__, ui
 from .config import Config
-from .errors import CodexAliasError
+from .errors import CodexAliasError, SessionLossyMappingError
 from .manager import REF_CURRENT, REF_SOURCE, CodexAlias
+
 
 def _mgr(ctx: click.Context) -> CodexAlias:
     return ctx.obj
+
+
+def _confirm_lossy_mapping(exc: SessionLossyMappingError, subject: str) -> None:
+    mappings = ", ".join(exc.mappings)
+    ui.warn(
+        f"{subject} requires a lossy session mapping ({mappings}); "
+        f"{exc.mapped_records} record(s) are affected."
+    )
+    if not ui.confirm("Apply this lossy mapping?", default=False):
+        raise click.ClickException("lossy session mapping declined")
 
 
 def _interactive_migrate(mgr: CodexAlias, target_home: Path) -> None:
@@ -74,13 +85,12 @@ def _choose_profile(mgr: CodexAlias) -> str | None:
 
 def _configure_profile_hooks(mgr: CodexAlias, profile: str) -> None:
     source_path = mgr.root_hooks_path()
-    if not source_path.is_file():
-        ui.info(f"No root hooks file found, skipped: {source_path}")
-        return
-
     options = mgr.profile_hook_options(profile)
     if not options:
-        ui.warn(f"No selectable hooks found in the root profile: {source_path}")
+        if source_path.is_file():
+            ui.warn(f"No selectable hooks found in the root profile: {source_path}")
+        else:
+            ui.info(f"No root or plugin hooks found, skipped: {source_path}")
         return
     try:
         selected = ui.select_hooks(profile, source_path, options)
@@ -107,14 +117,18 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
 
     if ui.confirm("Copy plugins/skills from source home?"):
         _copy_plugin_dirs(source, profile_path)
+        mgr.record_profile_sync_type(profile_path.name, "plugins")
     if ui.confirm("Copy current config (auth.json + config.toml)?"):
         _copy_core_config(source, profile_path)
+        mgr.record_profile_sync_type(profile_path.name, "config")
     _configure_profile_hooks(mgr, profile_path.name)
     if ui.confirm("Share sessions with root home (symlink)?"):
         for action in mgr._link_shared(profile_path, source):
             ui.success(action.message)
+        mgr.record_profile_sync_type(profile_path.name, "sessions_shared")
     elif ui.confirm("Migrate sessions into this profile?"):
         _interactive_migrate(mgr, profile_path)
+        mgr.record_profile_sync_type(profile_path.name, "sessions_migrate")
 
 
 _PLUGIN_DIRS = ("skills", ".skills", "plugins", ".plugins", ".agents", "agents", "mcp", ".mcp")
@@ -150,6 +164,67 @@ def _copy_core_config(src: Path, dst: Path) -> None:
             ui.info(f"Missing config file, skipped: {src_file}")
     if not copied:
         ui.info("No config files copied.")
+
+
+def _sync_plugins(mgr: CodexAlias, profile_path: Path) -> None:
+    _copy_plugin_dirs(mgr.config.source_home, profile_path)
+
+
+def _sync_config(mgr: CodexAlias, profile_path: Path) -> None:
+    _copy_core_config(mgr.config.source_home, profile_path)
+
+
+def _sync_hooks(mgr: CodexAlias, profile_path: Path) -> None:
+    ui.render_hook_sync_result(mgr.sync_profile_hooks(profile_path.name))
+
+
+def _sync_shared_sessions(mgr: CodexAlias, profile_path: Path) -> None:
+    for action in mgr._link_shared(profile_path, mgr.config.source_home):
+        ui.success(action.message)
+
+
+def _sync_migrated_sessions(mgr: CodexAlias, profile_path: Path) -> None:
+    _interactive_migrate(mgr, profile_path)
+
+
+_SYNC_MIGRATIONS = {
+    "plugins": _sync_plugins,
+    "config": _sync_config,
+    "hooks": _sync_hooks,
+    "sessions_shared": _sync_shared_sessions,
+    "sessions_migrate": _sync_migrated_sessions,
+}
+
+_SYNC_CONFIRM_TYPES = {"plugins", "config"}
+
+
+def _sync_profile(mgr: CodexAlias, profile: str, *, yes: bool = False) -> None:
+    """Run each migration recorded for PROFILE in its recorded order."""
+    profile_path = mgr.profile_home(profile, must_exist=True)
+    sync_types = mgr.profile_sync_types(profile)
+    if not sync_types:
+        ui.info(f"No saved sync types for profile '{profile}'.")
+        return
+    for sync_type in sync_types:
+        migration = _SYNC_MIGRATIONS.get(sync_type)
+        if migration is None:
+            ui.warn(f"Unknown sync type '{sync_type}', skipped.")
+            continue
+        if sync_type in _SYNC_CONFIRM_TYPES and not yes:
+            if not sys.stdin.isatty():
+                raise click.ClickException(
+                    f"syncing {sync_type} may overwrite profile files; "
+                    "run it from a TTY or pass --yes"
+                )
+            if not ui.confirm(
+                f"Sync {sync_type} into profile '{profile}'? "
+                "Existing profile files may be overwritten.",
+                default=False,
+            ):
+                ui.warn(f"Skipped {sync_type} for profile '{profile}'.")
+                continue
+        ui.info(f"Syncing {sync_type} for profile '{profile}' ...")
+        migration(mgr, profile_path)
 
 
 @click.group(
@@ -235,7 +310,15 @@ def resume(
     should_fix = ui.confirm("Fix session provider and model for this profile?")
     target_model = mgr.configured_model(target_home) if should_fix else None
 
-    result = mgr.clone_session_for_profile(session_id, target_home)
+    try:
+        result = mgr.clone_session_for_profile(
+            session_id, target_home, allow_lossy=False
+        )
+    except SessionLossyMappingError as exc:
+        _confirm_lossy_mapping(exc, "Session resume")
+        result = mgr.clone_session_for_profile(
+            session_id, target_home, allow_lossy=True
+        )
     ui.render_clone_result(result, target_label)
     if should_fix:
         fix_result = mgr.fix_session_provider(
@@ -339,9 +422,15 @@ def hooks(ctx: click.Context) -> None:
 
 @cli.command(name="sync")
 @click.argument("profile", required=False)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmations for sync types that may overwrite profile files.",
+)
 @click.pass_context
-def sync(ctx: click.Context, profile: str | None) -> None:
-    """Sync saved profile settings from the root home (currently hooks)."""
+def sync(ctx: click.Context, profile: str | None, yes: bool) -> None:
+    """Run the saved profile migration types from the root home in order."""
     mgr = _mgr(ctx)
     selected_profile = profile
     if selected_profile is None:
@@ -350,7 +439,12 @@ def sync(ctx: click.Context, profile: str | None) -> None:
         selected_profile = _choose_profile(mgr)
     if selected_profile is None:
         return
-    ui.render_hook_sync_result(mgr.sync_profile_hooks(selected_profile))
+    sync_types = mgr.profile_sync_types(selected_profile)
+    if "sessions_migrate" in sync_types and not sys.stdin.isatty():
+        raise click.ClickException(
+            "sync with session migration requires a TTY"
+        )
+    _sync_profile(mgr, selected_profile, yes=yes)
 
 
 @cli.command(name="import")
@@ -395,14 +489,31 @@ def fix_session(
     mgr = _mgr(ctx)
     target_home = mgr.resolve_home_ref(home).path
     target_provider = provider or mgr.configured_model_provider(target_home)
-    result = mgr.fix_session_provider(
-        target_home,
-        session_id,
-        target_provider,
-        model=model,
-        from_provider=from_provider,
-        dry_run=dry_run,
-    )
+    try:
+        result = mgr.fix_session_provider(
+            target_home,
+            session_id,
+            target_provider,
+            model=model,
+            from_provider=from_provider,
+            dry_run=dry_run,
+            allow_lossy=dry_run,
+        )
+    except SessionLossyMappingError as exc:
+        if not sys.stdin.isatty():
+            raise click.ClickException(
+                "lossy session mapping requires an interactive confirmation"
+            ) from exc
+        _confirm_lossy_mapping(exc, "Session repair")
+        result = mgr.fix_session_provider(
+            target_home,
+            session_id,
+            target_provider,
+            model=model,
+            from_provider=from_provider,
+            dry_run=dry_run,
+            allow_lossy=True,
+        )
     ui.render_fix_result(result)
 
 

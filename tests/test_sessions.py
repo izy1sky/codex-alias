@@ -8,6 +8,7 @@ import pytest
 from codex_alias import CodexAlias
 from codex_alias.errors import (
     SessionConflictError,
+    SessionLossyMappingError,
     SessionNotFoundError,
     SessionRepairError,
 )
@@ -100,6 +101,12 @@ def test_share_sessions_symlinks(mgr: CodexAlias) -> None:
     assert link.is_symlink()
     assert link.resolve() == (src / "sessions").resolve()
     assert mgr.list_profiles()[0].sessions_shared is True
+    state = json.loads(
+        (mgr.config.profile_path("work") / ".codexalias.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["sync"]["types"] == ["sessions_shared"]
 
 
 def _provider_session(home, session_id: str) -> object:
@@ -616,7 +623,7 @@ def test_clone_session_keeps_encrypted_reasoning_for_same_backend_alias(
     assert records[1]["payload"]["encrypted_content"] == "ciphertext"
 
 
-def test_clone_session_drops_encrypted_reasoning_across_known_backends(
+def test_clone_session_clears_encrypted_reasoning_across_known_backends(
     mgr: CodexAlias, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = mgr.config.source_home
@@ -640,20 +647,140 @@ def test_clone_session_drops_encrypted_reasoning_across_known_backends(
         {"target_api": "https://target.example/v1"},
     )
 
+    with pytest.raises(SessionLossyMappingError):
+        mgr.clone_session_for_profile(SID_A, target, allow_lossy=False)
+    assert not list((target / "sessions").rglob("*.jsonl"))
+
     result = mgr.clone_session_for_profile(SID_A, target)
 
     assert result.mapped_records == 1
-    assert result.dropped_records == 1
+    assert result.dropped_records == 0
     assert result.lossy_mappings == (
-        "foreign-backend-drop-encrypted-reasoning",
+        "foreign-backend-clear-encrypted-reasoning",
     )
     records = [json.loads(line) for line in result.path.read_text().splitlines()]
-    assert not any(
-        record.get("payload", {}).get("type") == "reasoning" for record in records
-    )
+    reasoning = [
+        record for record in records if record.get("payload", {}).get("type") == "reasoning"
+    ]
+    assert len(reasoning) == 1
+    assert reasoning[0]["payload"]["encrypted_content"] is None
     assert any(
         record.get("payload", {}).get("type") == "message" for record in records
     )
+
+
+def test_clone_session_preserves_paginated_ordinals_and_rewrites_thread_ids(
+    mgr: CodexAlias, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = mgr.config.source_home
+    records = [
+        {
+            "timestamp": "2026-08-17T05:03:13.364Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": SID_A,
+                "id": SID_A,
+                "model_provider": "source_api",
+                "history_mode": "paginated",
+            },
+        },
+        {
+            "timestamp": "2026-08-17T05:03:13.365Z",
+            "ordinal": 1,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": SID_A,
+                "item": {"session_id": SID_A},
+            },
+        },
+        {
+            "timestamp": "2026-08-17T05:03:13.366Z",
+            "ordinal": 2,
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": [],
+                "encrypted_content": "foreign-ciphertext",
+            },
+        },
+        {
+            "timestamp": "2026-08-17T05:03:13.367Z",
+            "ordinal": 3,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": SID_A,
+                "items": [{"thread_id": SID_A}],
+            },
+        },
+    ]
+    write_session(
+        source,
+        SID_A,
+        content="".join(json.dumps(record) + "\n" for record in records),
+    )
+    _write_provider_config(
+        source,
+        "source_api",
+        "gpt-5.5",
+        {"source_api": "https://source.example/v1"},
+    )
+    monkeypatch.setenv("HOME", str(source.parent))
+    (source.parent / ".codex").symlink_to(source, target_is_directory=True)
+
+    target = mgr.config.profile_path("target")
+    _write_provider_config(
+        target,
+        "target_api",
+        "gpt-5.6-sol",
+        {"target_api": "https://target.example/v1"},
+    )
+
+    result = mgr.clone_session_for_profile(SID_A, target)
+
+    copied = [json.loads(line) for line in result.path.read_text().splitlines()]
+    assert [record["ordinal"] for record in copied] == [0, 1, 2, 3]
+    assert copied[2]["payload"]["encrypted_content"] is None
+    assert copied[0]["payload"]["id"] == result.session_id
+    assert copied[0]["payload"]["session_id"] == result.session_id
+    assert copied[1]["payload"]["thread_id"] == result.session_id
+    assert copied[1]["payload"]["item"]["session_id"] == SID_A
+    assert copied[3]["payload"]["thread_id"] == result.session_id
+    assert copied[3]["payload"]["items"][0]["thread_id"] == SID_A
+
+
+def test_fix_session_provider_normalizes_paginated_ordinals(mgr: CodexAlias) -> None:
+    path = write_session(
+        mgr.config.source_home,
+        SID_A,
+        content="".join(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "ordinal": 4,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": SID_A,
+                        "model_provider": "custom",
+                        "history_mode": "paginated",
+                    },
+                },
+                {
+                    "ordinal": 9,
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant"},
+                },
+            )
+        ),
+    )
+
+    result = mgr.fix_session_provider(mgr.config.source_home, SID_A, "custom")
+
+    assert result.changed_records == 2
+    assert [json.loads(line)["ordinal"] for line in path.read_text().splitlines()] == [0, 1]
 
 
 def test_clone_session_does_not_guess_when_source_backend_is_unknown(

@@ -83,7 +83,7 @@ def _payload(record: Record, item_type: str) -> dict[str, object] | None:
     return payload
 
 
-def _drop_foreign_encrypted_reasoning(
+def _clear_foreign_encrypted_reasoning(
     record: Record, context: SessionMappingContext
 ) -> MappingAction:
     payload = _payload(record, "reasoning")
@@ -92,10 +92,12 @@ def _drop_foreign_encrypted_reasoning(
     encrypted = payload.get("encrypted_content")
     if not isinstance(encrypted, str) or not encrypted:
         return MappingAction.KEEP
-    # Reasoning ciphertext is backend-bound. Keeping it makes the target try to
-    # decrypt an opaque foreign blob; dropping only this internal item retains
-    # the public assistant answer and complete tool history.
-    return MappingAction.DROP
+    # Reasoning ciphertext is backend-bound. Keep the record itself so a
+    # paginated rollout retains its ordinal sequence, but remove the opaque
+    # blob before the target tries to replay it.  ``None`` is the wire-level
+    # representation used by Codex for an unavailable encrypted payload.
+    payload["encrypted_content"] = None
+    return MappingAction.REWRITE
 
 
 def _empty_gpt5_reasoning_content(
@@ -118,9 +120,9 @@ def _empty_gpt5_reasoning_content(
 # Add future behavior as another rule and state its loss classification.
 SESSION_MAPPING_RULES: tuple[SessionMappingRule, ...] = (
     SessionMappingRule(
-        name="foreign-backend-drop-encrypted-reasoning",
+        name="foreign-backend-clear-encrypted-reasoning",
         risk=MappingRisk.LOSSY,
-        map_record=_drop_foreign_encrypted_reasoning,
+        map_record=_clear_foreign_encrypted_reasoning,
     ),
     SessionMappingRule(
         name="gpt-5-empty-reasoning-content",

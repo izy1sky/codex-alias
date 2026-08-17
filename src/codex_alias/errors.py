@@ -47,5 +47,23 @@ class SessionRepairError(CodexAliasError):
     """A session cannot be inspected or repaired safely."""
 
 
+class SessionLossyMappingError(SessionRepairError):
+    """A session mapping would discard or clear data without confirmation."""
+
+    def __init__(
+        self,
+        mappings: tuple[str, ...],
+        mapped_records: int,
+        dropped_records: int,
+    ) -> None:
+        self.mappings = mappings
+        self.mapped_records = mapped_records
+        self.dropped_records = dropped_records
+        details = ", ".join(mappings) or "unknown mapping"
+        super().__init__(
+            f"lossy session mapping requires confirmation: {details}"
+        )
+
+
 class HookConfigError(CodexAliasError):
     """A Codex hook configuration cannot be read or updated safely."""

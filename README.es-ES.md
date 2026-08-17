@@ -41,10 +41,13 @@ codex-work
 Durante `add`, los prompts interactivos le permiten:
 1. Copiar complementos/habilidades desde el directorio de origen
 2. Copiar la configuración actual (`auth.json` + `config.toml`)
-3. Compartir sesiones con el directorio raíz (enlace simbólico)
-4. De lo contrario, migrar las sesiones al nuevo perfil
+3. Seleccionar los hooks del perfil raíz para compartirlos con el nuevo perfil
+4. Compartir sesiones con el directorio raíz (enlace simbólico)
+5. De lo contrario, migrar las sesiones al nuevo perfil
 
-Pase `--no-bootstrap` para omitir los prompts.
+Las elecciones se guardan como tipos de sincronización ordenados. Un `codexalias
+sync <profile>` posterior vuelve a ejecutar, en ese orden, el migrador
+correspondiente a cada tipo. Pase `--no-bootstrap` para omitir los prompts.
 
 ## Comandos
 
@@ -87,6 +90,12 @@ codexalias remove <profile> [command-name]
 
 # Environment and sanity checks
 codexalias doctor
+
+# Select root hooks for a profile
+codexalias hooks
+
+# Reapply the profile's saved migration types from the source home
+codexalias sync [profile] [--yes]
 ```
 
 `@source` hace referencia al directorio de origen configurado; `@current` hace referencia al
@@ -190,11 +199,13 @@ capacidades del modelo y de la API, no nombres de proveedores codificados.
 
 El historial cifrado tiene un límite de portabilidad distinto. Codexalias
 compara una huella normalizada `wire_api + base_url` cuando conoce ambos lados.
-Conserva el razonamiento cifrado entre alias del mismo backend, elimina el
-razonamiento cifrado externo como una conversión con pérdida y no adivina si
-falta una huella. Una compactación cifrada externa bloquea la reparación porque
-puede ser la única copia del contexto anterior. Las llamadas de herramientas
-incompletas o huérfanas solo generan diagnósticos. Añada futuras reglas en
+Conserva el razonamiento cifrado entre alias del mismo backend, mantiene el
+registro de razonamiento externo (y su ordinal paginado) pero limpia
+`encrypted_content` ligado al backend como una conversión con pérdida, y no
+adivina si falta una huella. Una compactación cifrada externa bloquea la
+reparación porque puede ser la única copia del contexto anterior. Las llamadas
+de herramientas incompletas o huérfanas solo generan diagnósticos. Añada futuras
+reglas en
 `src/codex_alias/session_mappings.py` y clasifíquelas como sin pérdida o con
 pérdida.
 

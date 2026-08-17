@@ -43,7 +43,9 @@ During `add`, interactive prompts let you:
 4. Share sessions with the root home (symlink)
 5. Otherwise migrate sessions into the new profile
 
-Pass `--no-bootstrap` to skip the prompts.
+The choices are recorded as ordered sync types. A later `codexalias sync
+<profile>` re-runs the corresponding migration handlers in that order. Pass
+`--no-bootstrap` to skip the prompts.
 
 ## Commands
 
@@ -94,8 +96,8 @@ codexalias doctor
 # Select root hooks for a profile
 codexalias hooks
 
-# Reapply saved profile settings from the root home (currently hooks)
-codexalias sync [profile]
+# Reapply the profile's saved migration types from the source home
+codexalias sync [profile] [--yes]
 ```
 
 `@source` refers to the configured source home; `@current` refers to the current
@@ -139,20 +141,26 @@ aliases and functions are inherited automatically.
 ## Hook sharing
 
 Codex reads hooks from `$CODEX_HOME/hooks.json`. Because each profile has its
-own `CODEX_HOME`, `codexalias add` offers a table of hooks from the root
-`~/.codex/hooks.json`. Use Space to toggle a row, Enter to review the selection,
-and confirm to write it. The standalone `codexalias hooks` command first asks
-which profile to edit and then opens the same table.
+own `CODEX_HOME`, `codexalias add` offers a table of hooks from the configured
+source home (`$CODEXALIAS_SOURCE_HOME/hooks.json`, default `~/.codex/hooks.json`).
+Use Space to toggle a row, Enter to review the selection, and confirm to write
+it. The standalone `codexalias hooks` command first asks which profile to edit
+and then opens the same table. Enabled plugin hooks remain selectable even when
+the source home has no standalone `hooks.json`.
 
 The table also includes hooks from enabled Codex plugins in the root
 `config.toml` (for example, `agent-trace`). When copied to a profile, plugin
 hooks are bound to their root plugin directory so `${PLUGIN_ROOT}` continues to
 work outside the plugin's own context.
 
-The selected root-hook references and the last applied snapshots are stored in
-the profile's `.codexalias.json`. Profile-local hooks are preserved. Running
-`codexalias sync <profile>` reapplies the saved selection, including root hook
-command changes, and removes only entries previously written by codexalias.
+The ordered migration types chosen during `add` are stored in the profile's
+`.codexalias.json` (`plugins`, `config`, `hooks`, `sessions_shared`, or
+`sessions_migrate`). Running `codexalias sync <profile>` walks those types in
+order and invokes each type's migration logic again. Plugin/config sync asks
+for confirmation before overwriting profile files; pass `--yes` for an explicit
+non-interactive approval. Profile-local hooks are preserved; hook-specific
+ownership snapshots remain internal to the hook migration so changed root hooks
+can be replaced safely.
 
 ## Library usage
 
@@ -235,13 +243,20 @@ names.
 
 Encrypted history has a separate portability boundary. Codexalias compares a
 normalized `wire_api + base_url` backend fingerprint when both sides are known.
-It preserves encrypted reasoning for aliases of the same backend, drops foreign
-encrypted reasoning as an explicitly reported lossy mapping, and does not guess
-when either backend is unknown. Foreign encrypted compaction blocks the repair
-because deleting it could remove the only copy of earlier context. Incomplete
+It preserves encrypted reasoning for aliases of the same backend, and treats
+foreign encrypted reasoning as an explicitly reported lossy mapping without
+dropping its record. It does not guess when either backend is unknown. For a
+known foreign backend it keeps the
+reasoning record (and its paginated ordinal) while clearing the backend-bound
+`encrypted_content`; this preserves the history cursor without replaying
+unreadable ciphertext. Foreign encrypted compaction blocks the repair because
+deleting it could remove the only copy of earlier context. Incomplete
 or orphan historical tool calls are reported as diagnostics but are not changed.
 Add future rules to `src/codex_alias/session_mappings.py` and classify each one
-as lossless or lossy.
+as lossless or lossy. When a lossy mapping is needed, the CLI asks for
+confirmation before writing a clone or repairing an existing session. Library
+callers can pass `allow_lossy=False` to require the same explicit decision in
+their own UI.
 
 Use `--profile cpa` to skip the profile picker or `--no-launch` to create the
 copy without starting Codex. The fix confirmation is still shown after the

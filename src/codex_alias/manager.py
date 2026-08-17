@@ -148,13 +148,13 @@ class CodexAlias:
         return target
 
     def root_hooks_path(self) -> Path:
-        """Return the hooks file belonging to the default root Codex home."""
-        return hooks_mod.hooks_path(self.default_source_home())
+        """Return the hooks file belonging to the configured source home."""
+        return hooks_mod.hooks_path(self.config.source_home)
 
     def profile_hook_options(self, profile: str) -> list[HookOption]:
         """List root hooks and their saved selection for PROFILE."""
         profile_path = self.profile_home(profile, must_exist=True)
-        return hooks_mod.list_options(self.default_source_home(), profile_path)
+        return hooks_mod.list_options(self.config.source_home, profile_path)
 
     def configure_profile_hooks(
         self, profile: str, selected: set[str]
@@ -162,13 +162,23 @@ class CodexAlias:
         """Apply and remember selected root hooks for PROFILE."""
         profile_path = self.profile_home(profile, must_exist=True)
         return hooks_mod.configure_hooks(
-            self.default_source_home(), profile_path, selected
+            self.config.source_home, profile_path, selected
         )
+
+    def record_profile_sync_type(self, profile: str, sync_type: str) -> None:
+        """Remember that PROFILE should run one migration type during sync."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        hooks_mod.record_sync_type(profile_path, sync_type)
+
+    def profile_sync_types(self, profile: str) -> tuple[str, ...]:
+        """Return PROFILE's ordered migration types, if any were recorded."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        return hooks_mod.saved_sync_types(profile_path)
 
     def sync_profile_hooks(self, profile: str) -> HookSyncResult:
         """Reapply PROFILE's saved root-hook selection."""
         profile_path = self.profile_home(profile, must_exist=True)
-        return hooks_mod.sync_saved_hooks(self.default_source_home(), profile_path)
+        return hooks_mod.sync_saved_hooks(self.config.source_home, profile_path)
 
     def remove_wrapper(self, profile: str, command_name: str | None = None) -> tuple[Path, bool]:
         """Delete a wrapper command; profile data is left intact."""
@@ -421,7 +431,7 @@ class CodexAlias:
         )
 
     def clone_session_for_profile(
-        self, query: str, target_home: Path
+        self, query: str, target_home: Path, *, allow_lossy: bool = True
     ) -> SessionCloneResult:
         src_home, session = self.find_session(query)
         provider = sessions_mod.configured_model_provider(target_home)
@@ -436,6 +446,7 @@ class CodexAlias:
             provider,
             model,
             mapping_context=mapping_context,
+            allow_lossy=allow_lossy,
         )
 
     def configured_model_provider(self, home: Path) -> str:
@@ -453,6 +464,7 @@ class CodexAlias:
         model: str | None = None,
         from_provider: str | None = None,
         dry_run: bool = False,
+        allow_lossy: bool = True,
     ) -> SessionFixResult:
         session = sessions_mod.resolve_session_file(home, query)
         mapping_context = self._session_mapping_context(
@@ -465,6 +477,7 @@ class CodexAlias:
             from_provider=from_provider,
             dry_run=dry_run,
             mapping_context=mapping_context,
+            allow_lossy=allow_lossy,
         )
         state_changed, state_backup_path = sessions_mod.fix_session_state_provider(
             home,
@@ -503,7 +516,9 @@ class CodexAlias:
         """
         profile_path = self.profile_home(profile, must_exist=True)
         source_home = self.resolve_home_ref(source_ref).path
-        return self._link_shared(profile_path, source_home)
+        actions = self._link_shared(profile_path, source_home)
+        hooks_mod.record_sync_type(profile_path, "sessions_shared")
+        return actions
 
     def _link_shared(self, profile_path: Path, source_home: Path) -> list[LinkAction]:
         actions: list[LinkAction] = []

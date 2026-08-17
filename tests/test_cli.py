@@ -219,3 +219,65 @@ def test_resume_skips_fix_when_declined(monkeypatch, tmp_path) -> None:
     copied = next(target.glob("sessions/**/*.jsonl"))
     records = [json.loads(line) for line in copied.read_text().splitlines()]
     assert records[1]["payload"]["thread_settings"]["model"] == "gpt-5.6-sol"
+
+
+def test_resume_confirms_before_lossy_history_mapping(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    write_session(
+        source,
+        SID,
+        content=(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": SID, "model_provider": "source_api"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "content": [],
+                        "encrypted_content": "foreign-ciphertext",
+                    },
+                }
+            )
+            + "\n"
+        ),
+    )
+    (source / "config.toml").write_text(
+        "model_provider = \"source_api\"\n"
+        "[model_providers.source_api]\n"
+        "base_url = \"https://source.example/v1\"\n"
+        "wire_api = \"responses\"\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "profiles" / "target"
+    target.mkdir(parents=True)
+    (target / "config.toml").write_text(
+        "model = \"gpt-5.6-sol\"\n"
+        "model_provider = \"target_api\"\n"
+        "[model_providers.target_api]\n"
+        "base_url = \"https://target.example/v1\"\n"
+        "wire_api = \"responses\"\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["resume", SID, "--profile", "target", "--no-launch"],
+        input="n\ny\n",
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(tmp_path / "profiles"),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Apply this lossy mapping?" in result.output
+    copied = next(target.glob("sessions/**/*.jsonl"))
+    records = [json.loads(line) for line in copied.read_text().splitlines()]
+    assert records[1]["payload"]["encrypted_content"] is None

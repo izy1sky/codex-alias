@@ -22,6 +22,7 @@ from .models import HookOption, HookSyncResult
 
 HOOKS_FILENAME = "hooks.json"
 PROFILE_STATE_FILENAME = ".codexalias.json"
+SYNC_TYPES_KEY = "types"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +202,7 @@ def _plugin_hooks(source_home: Path) -> list[_SourceHook]:
 
 
 def _all_source_hooks(source_home: Path) -> list[_SourceHook]:
-    document, _ = _read_json(hooks_path(source_home))
+    document, _ = _read_json(hooks_path(source_home), missing_ok=True)
     return _source_hooks(document) + _plugin_hooks(source_home)
 
 
@@ -240,6 +241,51 @@ def _saved_hook_state(state: dict[str, Any]) -> dict[str, Any] | None:
         return None
     hooks = sync.get("hooks")
     return hooks if isinstance(hooks, dict) else None
+
+
+def _sync_types_from_state(state: dict[str, Any]) -> list[str]:
+    sync = state.get("sync")
+    if not isinstance(sync, dict):
+        return []
+    raw_types = sync.get(SYNC_TYPES_KEY)
+    if isinstance(raw_types, list):
+        return list(
+            dict.fromkeys(
+                value for value in raw_types if isinstance(value, str) and value
+            )
+        )
+    # Profiles written before sync.types was introduced only had hook sync
+    # state. Keep those profiles usable without requiring a manual migration.
+    if _saved_hook_state(state) is not None:
+        return ["hooks"]
+    return []
+
+
+def saved_sync_types(target_home: Path) -> tuple[str, ...]:
+    """Return the ordered migration types recorded for a profile."""
+    state, _ = _read_state(profile_state_path(target_home))
+    return tuple(_sync_types_from_state(state))
+
+
+def record_sync_type(target_home: Path, sync_type: str) -> None:
+    """Record one migration type without recording a new selection payload."""
+    sync_type = sync_type.strip()
+    if not sync_type:
+        raise HookConfigError("sync type must not be empty")
+    state, _ = _read_state(profile_state_path(target_home))
+    next_state = copy.deepcopy(state)
+    sync = next_state.setdefault("sync", {})
+    if not isinstance(sync, dict):
+        sync = {}
+        next_state["sync"] = sync
+    types = _sync_types_from_state(state)
+    if sync_type not in types:
+        types.append(sync_type)
+    sync[SYNC_TYPES_KEY] = types
+    next_state.setdefault("version", 1)
+    if next_state != state:
+        target_home.mkdir(parents=True, exist_ok=True)
+        _write_json(profile_state_path(target_home), next_state, backup=False)
 
 
 def _selected_keys(
@@ -370,6 +416,10 @@ def _apply_selection(
     if not isinstance(sync, dict):
         sync = {}
         next_state["sync"] = sync
+    sync_types = _sync_types_from_state(state)
+    if "hooks" not in sync_types:
+        sync_types.append("hooks")
+    sync[SYNC_TYPES_KEY] = sync_types
     sync["hooks"] = saved_state
     next_state.setdefault("version", 1)
 
