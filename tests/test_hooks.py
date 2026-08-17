@@ -58,6 +58,41 @@ def _read_hooks(home) -> dict:
     return json.loads((home / "hooks.json").read_text(encoding="utf-8"))
 
 
+def _write_agent_trace_plugin(home) -> None:
+    plugin_root = (
+        home / ".tmp" / "marketplaces" / "ai-minions-skills" / "plugins" / "agent-trace"
+    )
+    (plugin_root / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / "hooks").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"hooks": "./hooks/codex-hooks.json"}), encoding="utf-8"
+    )
+    (plugin_root / "hooks" / "codex-hooks.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "startup|resume",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash \"${PLUGIN_ROOT}/scripts/ship-transcript.sh\" session_start",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "config.toml").write_text(
+        '[plugins."agent-trace@ai-minions-skills"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+
 def test_profile_hook_selection_preserves_custom_hooks_and_persists_settings(
     mgr: CodexAlias,
 ) -> None:
@@ -83,6 +118,27 @@ def test_profile_hook_selection_preserves_custom_hooks_and_persists_settings(
     state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
     assert state["sync"]["hooks"]["selected"] == [options[0].key]
     assert state["sync"]["hooks"]["applied"][options[0].key]["owned"] is True
+
+
+def test_enabled_codex_plugin_hooks_are_selectable_and_bound(mgr: CodexAlias) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    _write_agent_trace_plugin(root)
+    mgr.add_profile("work")
+
+    options = mgr.profile_hook_options("work")
+    trace = next(option for option in options if option.source == "agent-trace@ai-minions-skills")
+    assert trace.event == "SessionStart"
+    assert "export PLUGIN_ROOT" in trace.detail
+    assert "scripts/ship-transcript.sh" in trace.detail
+
+    result = mgr.configure_profile_hooks("work", {trace.key})
+
+    assert result.added == 1
+    target = mgr.config.profile_path("work")
+    command = _read_hooks(target)["hooks"]["SessionStart"][-1]["hooks"][0]["command"]
+    assert "PLUGIN_ROOT=" in command
+    assert "scripts/ship-transcript.sh" in command
 
 
 def test_profile_hook_sync_replaces_changed_root_hook(mgr: CodexAlias) -> None:

@@ -5,11 +5,17 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 from .errors import HookConfigError
 from .models import HookOption, HookSyncResult
@@ -24,6 +30,7 @@ class _SourceHook:
     event: str
     matcher: Any
     hook: dict[str, Any]
+    source: str = "root"
 
 
 def hooks_path(home: Path) -> Path:
@@ -73,21 +80,129 @@ def _hook_key(event: str, rule_index: int, hook_index: int) -> str:
     return f"{event}:{rule_index}:{hook_index}"
 
 
-def _source_hooks(document: dict[str, Any]) -> list[_SourceHook]:
+def _source_hooks(
+    document: dict[str, Any], *, key_prefix: str = "", source: str = "root",
+    plugin_root: Path | None = None
+) -> list[_SourceHook]:
     result: list[_SourceHook] = []
     for event, rules in document.get("hooks", {}).items():
         for rule_index, rule in enumerate(rules):
             matcher = rule.get("matcher")
             for hook_index, hook in enumerate(rule.get("hooks", [])):
+                bound_hook = copy.deepcopy(hook)
+                if plugin_root is not None:
+                    bound_hook = _bind_plugin_root(bound_hook, plugin_root)
                 result.append(
                     _SourceHook(
-                        key=_hook_key(event, rule_index, hook_index),
+                        key=f"{key_prefix}{_hook_key(event, rule_index, hook_index)}",
                         event=event,
                         matcher=matcher,
-                        hook=copy.deepcopy(hook),
+                        hook=bound_hook,
+                        source=source,
                     )
                 )
     return result
+
+
+def _bind_plugin_root(hook: dict[str, Any], plugin_root: Path) -> dict[str, Any]:
+    """Make a plugin hook usable after it is copied out of plugin context."""
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return hook
+    if "${PLUGIN_ROOT}" not in command and "${CLAUDE_PLUGIN_ROOT}" not in command:
+        return hook
+    root = shlex.quote(str(plugin_root))
+    hook["command"] = (
+        f"PLUGIN_ROOT={root}; export PLUGIN_ROOT; "
+        f"CLAUDE_PLUGIN_ROOT={root}; export CLAUDE_PLUGIN_ROOT; {command}"
+    )
+    return hook
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise HookConfigError(f"failed to read Codex config {path}: {exc}") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def _plugin_root(source_home: Path, plugin_id: str) -> Path | None:
+    plugin_name, separator, marketplace = plugin_id.partition("@")
+    if not separator or not plugin_name or not marketplace:
+        return None
+    direct_candidates = (
+        source_home / ".tmp" / "marketplaces" / marketplace / "plugins" / plugin_name,
+        source_home / ".tmp" / "plugins" / "plugins" / plugin_name,
+    )
+    for candidate in direct_candidates:
+        if (candidate / ".codex-plugin" / "plugin.json").is_file():
+            return candidate
+
+    cached = source_home / "plugins" / "cache" / marketplace / plugin_name
+    if not cached.is_dir():
+        return None
+    versions = sorted(
+        (candidate for candidate in cached.iterdir() if candidate.is_dir()),
+        key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name),
+        reverse=True,
+    )
+    for candidate in versions:
+        if (candidate / ".codex-plugin" / "plugin.json").is_file():
+            return candidate
+    return None
+
+
+def _plugin_hooks(source_home: Path) -> list[_SourceHook]:
+    config = _read_toml(source_home / "config.toml")
+    plugins = config.get("plugins", {})
+    if not isinstance(plugins, dict):
+        return []
+
+    result: list[_SourceHook] = []
+    for plugin_id, settings in plugins.items():
+        if not isinstance(plugin_id, str) or not isinstance(settings, dict):
+            continue
+        if settings.get("enabled") is not True:
+            continue
+        root = _plugin_root(source_home, plugin_id)
+        if root is None:
+            continue
+        try:
+            manifest_value = json.loads(
+                (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest_value, dict):
+            continue
+        manifest = manifest_value
+        hooks_ref = manifest.get("hooks")
+        if not isinstance(hooks_ref, str):
+            continue
+        hooks_file = (root / hooks_ref).resolve()
+        if not hooks_file.is_file():
+            continue
+        try:
+            document, _ = _read_json(hooks_file)
+        except HookConfigError:
+            continue
+        result.extend(
+            _source_hooks(
+                document,
+                key_prefix=f"plugin:{plugin_id}:",
+                source=plugin_id,
+                plugin_root=root,
+            )
+        )
+    return result
+
+
+def _all_source_hooks(source_home: Path) -> list[_SourceHook]:
+    document, _ = _read_json(hooks_path(source_home))
+    return _source_hooks(document) + _plugin_hooks(source_home)
 
 
 def _hook_detail(hook: dict[str, Any]) -> tuple[str, str]:
@@ -148,10 +263,9 @@ def _selected_keys(
 
 def list_options(source_home: Path, target_home: Path) -> list[HookOption]:
     """List root hooks with selection state from a target profile."""
-    source_document, _ = _read_json(hooks_path(source_home))
     target_document, _ = _read_json(hooks_path(target_home), missing_ok=True)
     state, _ = _read_state(profile_state_path(target_home))
-    source = _source_hooks(source_document)
+    source = _all_source_hooks(source_home)
     selected = _selected_keys(state, target_document, source)
     return [
         HookOption(
@@ -160,6 +274,7 @@ def list_options(source_home: Path, target_home: Path) -> list[HookOption]:
             matcher=_matcher_label(item.matcher),
             hook_type=_hook_detail(item.hook)[0],
             detail=_hook_detail(item.hook)[1],
+            source=item.source,
             selected=item.key in selected,
         )
         for item in source
@@ -195,9 +310,8 @@ def _apply_selection(
 ) -> HookSyncResult:
     source_path = hooks_path(source_home)
     target_path = hooks_path(target_home)
-    source_document, _ = _read_json(source_path)
     target_document, _ = _read_json(target_path, missing_ok=True)
-    source = _source_hooks(source_document)
+    source = _all_source_hooks(source_home)
     source_by_key = {item.key: item for item in source}
     valid_selected = [item for item in source if item.key in selected]
     missing = tuple(sorted(selected - set(source_by_key)))

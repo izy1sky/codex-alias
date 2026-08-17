@@ -144,6 +144,11 @@ own `CODEX_HOME`, `codexalias add` offers a table of hooks from the root
 and confirm to write it. The standalone `codexalias hooks` command first asks
 which profile to edit and then opens the same table.
 
+The table also includes hooks from enabled Codex plugins in the root
+`config.toml` (for example, `agent-trace`). When copied to a profile, plugin
+hooks are bound to their root plugin directory so `${PLUGIN_ROOT}` continues to
+work outside the plugin's own context.
+
 The selected root-hook references and the last applied snapshots are stored in
 the profile's `.codexalias.json`. Profile-local hooks are preserved. Running
 `codexalias sync <profile>` reapplies the saved selection, including root hook

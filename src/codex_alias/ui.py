@@ -336,6 +336,7 @@ def _render_hook_picker(
     console.print(f"[dim]Source: {source_path}[/]")
     table = Table(show_header=True, expand=True, box=None, pad_edge=False)
     table.add_column("", width=3, no_wrap=True)
+    table.add_column("Source", style="yellow", no_wrap=True)
     table.add_column("Event", style="cyan", no_wrap=True)
     table.add_column("Matcher", style="magenta", no_wrap=True)
     table.add_column("Type", style="green", no_wrap=True)
@@ -347,6 +348,7 @@ def _render_hook_picker(
         pointer = ">" if index == cursor else " "
         table.add_row(
             f"{pointer}{marker}",
+            option.source,
             option.event,
             option.matcher,
             option.hook_type,

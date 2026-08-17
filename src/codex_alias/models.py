@@ -131,6 +131,7 @@ class HookOption:
     matcher: str
     hook_type: str
     detail: str
+    source: str = "root"
     selected: bool = False
 
 
