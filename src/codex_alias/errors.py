@@ -45,3 +45,7 @@ class SessionConflictError(CodexAliasError):
 
 class SessionRepairError(CodexAliasError):
     """A session cannot be inspected or repaired safely."""
+
+
+class HookConfigError(CodexAliasError):
+    """A Codex hook configuration cannot be read or updated safely."""

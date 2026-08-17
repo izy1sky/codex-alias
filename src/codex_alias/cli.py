@@ -61,6 +61,42 @@ def _interactive_migrate(mgr: CodexAlias, target_home: Path) -> None:
     ui.render_copy_results([result])
 
 
+def _choose_profile(mgr: CodexAlias) -> str | None:
+    profiles = mgr.list_profiles()
+    if not profiles:
+        ui.info("No profiles found.")
+        return None
+    return ui.choose(
+        "Choose a profile",
+        [(profile.name, f"{profile.name} ({profile.path})") for profile in profiles],
+    )
+
+
+def _configure_profile_hooks(mgr: CodexAlias, profile: str) -> None:
+    source_path = mgr.root_hooks_path()
+    if not source_path.is_file():
+        ui.info(f"No root hooks file found, skipped: {source_path}")
+        return
+
+    options = mgr.profile_hook_options(profile)
+    if not options:
+        ui.warn(f"No selectable hooks found in the root profile: {source_path}")
+        return
+    try:
+        selected = ui.select_hooks(profile, source_path, options)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if selected is None:
+        return
+    if not ui.confirm(
+        f"Write {len(selected)} selected root hook(s) to profile '{profile}'?",
+        default=False,
+    ):
+        ui.warn("No hook changes written.")
+        return
+    ui.render_hook_sync_result(mgr.configure_profile_hooks(profile, selected))
+
+
 def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
     """Interactive post-create setup, matching the shell tool's prompts."""
     if not sys.stdin.isatty():
@@ -73,6 +109,7 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
         _copy_plugin_dirs(source, profile_path)
     if ui.confirm("Copy current config (auth.json + config.toml)?"):
         _copy_core_config(source, profile_path)
+    _configure_profile_hooks(mgr, profile_path.name)
     if ui.confirm("Share sessions with root home (symlink)?"):
         for action in mgr._link_shared(profile_path, source):
             ui.success(action.message)
@@ -286,6 +323,34 @@ def refresh_wrappers(ctx: click.Context) -> None:
         ui.success(f"Refreshed wrapper: {target}")
     if not targets:
         ui.info("No profiles found.")
+
+
+@cli.command(name="hooks")
+@click.pass_context
+def hooks(ctx: click.Context) -> None:
+    """Select which root hooks a profile should share."""
+    if not sys.stdin.isatty():
+        raise click.ClickException("hook selection requires a TTY")
+    mgr = _mgr(ctx)
+    profile = _choose_profile(mgr)
+    if profile is not None:
+        _configure_profile_hooks(mgr, profile)
+
+
+@cli.command(name="sync")
+@click.argument("profile", required=False)
+@click.pass_context
+def sync(ctx: click.Context, profile: str | None) -> None:
+    """Sync saved profile settings from the root home (currently hooks)."""
+    mgr = _mgr(ctx)
+    selected_profile = profile
+    if selected_profile is None:
+        if not sys.stdin.isatty():
+            raise click.ClickException("sync without a profile requires a TTY")
+        selected_profile = _choose_profile(mgr)
+    if selected_profile is None:
+        return
+    ui.render_hook_sync_result(mgr.sync_profile_hooks(selected_profile))
 
 
 @cli.command(name="import")

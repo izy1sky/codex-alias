@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+from click.testing import CliRunner
+
+from codex_alias import CodexAlias, HookConfigError
+from codex_alias.cli import cli
+
+
+def _write_hooks(home, document: dict) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "hooks.json").write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _root_hooks() -> dict:
+    return {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "startup|clear",
+                    "hooks": [
+                        {"type": "command", "command": "root-start"},
+                    ],
+                }
+            ],
+            "SessionEnd": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "root-end"},
+                    ]
+                }
+            ],
+        }
+    }
+
+
+def _profile_hooks() -> dict:
+    return {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "profile-only"},
+                    ]
+                }
+            ]
+        }
+    }
+
+
+def _read_hooks(home) -> dict:
+    return json.loads((home / "hooks.json").read_text(encoding="utf-8"))
+
+
+def test_profile_hook_selection_preserves_custom_hooks_and_persists_settings(
+    mgr: CodexAlias,
+) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    mgr.add_profile("work")
+    target = mgr.config.profile_path("work")
+    _write_hooks(target, _profile_hooks())
+
+    options = mgr.profile_hook_options("work")
+    assert [option.event for option in options] == ["SessionStart", "SessionEnd"]
+    assert all(not option.selected for option in options)
+
+    result = mgr.configure_profile_hooks("work", {options[0].key})
+
+    assert result.added == 1
+    assert result.removed == 0
+    document = _read_hooks(target)
+    assert document["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "profile-only"
+    assert document["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "root-start"
+    assert "SessionEnd" not in document["hooks"]
+
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["hooks"]["selected"] == [options[0].key]
+    assert state["sync"]["hooks"]["applied"][options[0].key]["owned"] is True
+
+
+def test_profile_hook_sync_replaces_changed_root_hook(mgr: CodexAlias) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    mgr.add_profile("work")
+    target = mgr.config.profile_path("work")
+    options = mgr.profile_hook_options("work")
+    mgr.configure_profile_hooks("work", {options[0].key})
+
+    changed = _root_hooks()
+    changed["hooks"]["SessionStart"][0]["hooks"][0]["command"] = "root-start-v2"
+    _write_hooks(root, changed)
+
+    result = mgr.sync_profile_hooks("work")
+
+    assert result.removed == 1
+    assert result.added == 1
+    document = _read_hooks(target)
+    commands = [
+        hook["command"]
+        for rules in document["hooks"].values()
+        for rule in rules
+        for hook in rule["hooks"]
+        if "command" in hook
+    ]
+    assert "root-start" not in commands
+    assert "root-start-v2" in commands
+
+
+def test_deselecting_hooks_removes_only_owned_entries(mgr: CodexAlias) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    mgr.add_profile("work")
+    target = mgr.config.profile_path("work")
+    _write_hooks(target, _profile_hooks())
+    options = mgr.profile_hook_options("work")
+
+    mgr.configure_profile_hooks("work", {options[0].key})
+    result = mgr.configure_profile_hooks("work", set())
+
+    assert result.removed == 1
+    document = _read_hooks(target)
+    assert "SessionStart" not in document["hooks"]
+    assert "UserPromptSubmit" in document["hooks"]
+
+
+def test_sync_requires_saved_profile_settings(mgr: CodexAlias) -> None:
+    root = mgr.default_source_home()
+    _write_hooks(root, _root_hooks())
+    mgr.add_profile("work")
+
+    with pytest.raises(HookConfigError, match="no saved hook settings"):
+        mgr.sync_profile_hooks("work")
+
+
+def test_sync_command_applies_saved_hooks(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    _write_hooks(source, _root_hooks())
+    target.mkdir(parents=True)
+    (target / ".codexalias.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sync": {"hooks": {"source": "default", "selected": ["SessionStart:0:0"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SHELL", raising=False)
+
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _read_hooks(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "root-start"

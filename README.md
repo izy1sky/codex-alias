@@ -39,8 +39,9 @@ codex-work
 During `add`, interactive prompts let you:
 1. Copy plugins/skills from the source home
 2. Copy current config (`auth.json` + `config.toml`)
-3. Share sessions with the root home (symlink)
-4. Otherwise migrate sessions into the new profile
+3. Select root-profile hooks to share with the new profile
+4. Share sessions with the root home (symlink)
+5. Otherwise migrate sessions into the new profile
 
 Pass `--no-bootstrap` to skip the prompts.
 
@@ -89,6 +90,12 @@ codexalias remove <profile> [command-name] --keep-data
 
 # Environment and sanity checks
 codexalias doctor
+
+# Select root hooks for a profile
+codexalias hooks
+
+# Reapply saved profile settings from the root home (currently hooks)
+codexalias sync [profile]
 ```
 
 `@source` refers to the configured source home; `@current` refers to the current
@@ -128,6 +135,19 @@ codexa resume <session-id>
 
 The explicit override must be an executable name or path. Without it, shell
 aliases and functions are inherited automatically.
+
+## Hook sharing
+
+Codex reads hooks from `$CODEX_HOME/hooks.json`. Because each profile has its
+own `CODEX_HOME`, `codexalias add` offers a table of hooks from the root
+`~/.codex/hooks.json`. Use Space to toggle a row, Enter to review the selection,
+and confirm to write it. The standalone `codexalias hooks` command first asks
+which profile to edit and then opens the same table.
+
+The selected root-hook references and the last applied snapshots are stored in
+the profile's `.codexalias.json`. Profile-local hooks are preserved. Running
+`codexalias sync <profile>` reapplies the saved selection, including root hook
+command changes, and removes only entries previously written by codexalias.
 
 ## Library usage
 

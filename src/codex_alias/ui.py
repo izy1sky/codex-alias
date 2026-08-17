@@ -7,14 +7,23 @@ filesystem logic; it only formats value objects and reads user input.
 
 from __future__ import annotations
 
+import select
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
+from rich.table import Table
 from rich.text import Text
 
 from .models import (
     CopyStatus,
     DoctorReport,
     HomeRef,
+    HookOption,
+    HookSyncResult,
     Profile,
     SessionCloneResult,
     SessionCopyResult,
@@ -226,6 +235,151 @@ def choose(prompt: str, options: list[tuple[str, str]]) -> str:
 
 def confirm(question: str, default: bool = False) -> bool:
     return Confirm.ask(question, default=default)
+
+
+@contextmanager
+def _raw_key_mode() -> Iterator[None]:
+    """Read one key at a time while always restoring the terminal settings."""
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+
+
+def _read_key() -> str:
+    key = sys.stdin.read(1)
+    if key in ("\r", "\n"):
+        return "confirm"
+    if key == " ":
+        return "toggle"
+    if key in ("q", "Q", "\x03"):
+        return "cancel"
+    if key in ("j", "J"):
+        return "down"
+    if key in ("k", "K"):
+        return "up"
+    if key == "a" or key == "A":
+        return "all"
+    if key == "n" or key == "N":
+        return "none"
+    if key != "\x1b":
+        return "unknown"
+
+    sequence = key
+    while select.select([sys.stdin], [], [], 0.02)[0]:
+        sequence += sys.stdin.read(1)
+        if sequence[-1].isalpha() or sequence[-1] == "~":
+            break
+    if sequence == "\x1b":
+        return "cancel"
+    return {
+        "\x1b[A": "up",
+        "\x1b[B": "down",
+        "\x1b[C": "right",
+        "\x1b[D": "left",
+    }.get(sequence, "unknown")
+
+
+def _render_hook_picker(
+    profile: str,
+    source_path: Path,
+    options: list[HookOption],
+    selected: set[str],
+    cursor: int,
+) -> None:
+    console.clear()
+    heading(f"Root hooks -> {profile}")
+    console.print(f"[dim]Source: {source_path}[/]")
+    table = Table(show_header=True, expand=True, box=None, pad_edge=False)
+    table.add_column("", width=3, no_wrap=True)
+    table.add_column("Event", style="cyan", no_wrap=True)
+    table.add_column("Matcher", style="magenta", no_wrap=True)
+    table.add_column("Type", style="green", no_wrap=True)
+    table.add_column(
+        "Command / prompt", overflow="ellipsis", no_wrap=True, max_width=96
+    )
+    for index, option in enumerate(options):
+        marker = "[bold green]x[/]" if option.key in selected else " "
+        pointer = ">" if index == cursor else " "
+        table.add_row(
+            f"{pointer}{marker}",
+            option.event,
+            option.matcher,
+            option.hook_type,
+            option.detail,
+            style="reverse" if index == cursor else None,
+        )
+    console.print(table)
+    console.print(
+        "[dim]↑/↓ or j/k move   Space toggle   a all   n none   "
+        "Enter review   q cancel[/]"
+    )
+
+
+def select_hooks(
+    profile: str, source_path: Path, options: list[HookOption]
+) -> set[str] | None:
+    """Interactively select root hooks; return None when cancelled."""
+    if not options:
+        heading(f"Root hooks -> {profile}")
+        console.print(f"[dim]Source: {source_path}[/]")
+        warn("No selectable hooks found in the root profile.")
+        return set()
+    if not sys.stdin.isatty():
+        raise RuntimeError("hook selection requires an interactive terminal")
+
+    selected = {option.key for option in options if option.selected}
+    cursor = 0
+    try:
+        with _raw_key_mode():
+            while True:
+                _render_hook_picker(profile, source_path, options, selected, cursor)
+                key = _read_key()
+                if key == "confirm":
+                    break
+                if key == "cancel":
+                    console.clear()
+                    warn("Hook selection cancelled; nothing was written.")
+                    return None
+                if key == "up":
+                    cursor = (cursor - 1) % len(options)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(options)
+                elif key == "toggle":
+                    option = options[cursor]
+                    if option.key in selected:
+                        selected.remove(option.key)
+                    else:
+                        selected.add(option.key)
+                elif key == "all":
+                    selected = {option.key for option in options}
+                elif key == "none":
+                    selected.clear()
+    except (ImportError, OSError, RuntimeError) as exc:
+        raise RuntimeError(f"cannot start hook selection TUI: {exc}") from exc
+    console.clear()
+    return selected
+
+
+def render_hook_sync_result(result: HookSyncResult) -> None:
+    heading("Profile hooks")
+    if result.changed:
+        success(
+            f"Synced {result.selected_count} selected root hook(s): "
+            f"{result.added} added, {result.removed} removed"
+        )
+    else:
+        info(f"Profile already matches {result.selected_count} selected root hook(s).")
+    for key in result.missing:
+        warn(f"Saved root hook is no longer present: {key}")
+    if result.backup_path is not None:
+        info(f"Hook backup: {result.backup_path}")
 
 
 def home_ref_label(ref: HomeRef) -> str:

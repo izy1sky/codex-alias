@@ -122,6 +122,32 @@ class LinkAction:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class HookOption:
+    """One selectable leaf hook from the root profile."""
+
+    key: str
+    event: str
+    matcher: str
+    hook_type: str
+    detail: str
+    selected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class HookSyncResult:
+    """Summary of syncing selected root hooks into one profile."""
+
+    source_path: Path
+    target_path: Path
+    selected_count: int
+    added: int
+    removed: int
+    missing: tuple[str, ...] = ()
+    backup_path: Path | None = None
+    changed: bool = False
+
+
 @dataclass(slots=True)
 class DoctorReport:
     """Environment snapshot and sanity checks."""

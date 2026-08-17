@@ -29,6 +29,8 @@ from .models import (
     DoctorReport,
     HomeKind,
     HomeRef,
+    HookOption,
+    HookSyncResult,
     LinkAction,
     Profile,
     ProfileRemoveResult,
@@ -37,6 +39,7 @@ from .models import (
     SessionFile,
     SessionFixResult,
 )
+from . import hooks as hooks_mod
 from . import sessions as sessions_mod
 from .session_mappings import SessionMappingContext
 
@@ -143,6 +146,29 @@ class CodexAlias:
         target.write_text(self._wrapper_script(profile), encoding="utf-8")
         target.chmod(target.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         return target
+
+    def root_hooks_path(self) -> Path:
+        """Return the hooks file belonging to the default root Codex home."""
+        return hooks_mod.hooks_path(self.default_source_home())
+
+    def profile_hook_options(self, profile: str) -> list[HookOption]:
+        """List root hooks and their saved selection for PROFILE."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        return hooks_mod.list_options(self.default_source_home(), profile_path)
+
+    def configure_profile_hooks(
+        self, profile: str, selected: set[str]
+    ) -> HookSyncResult:
+        """Apply and remember selected root hooks for PROFILE."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        return hooks_mod.configure_hooks(
+            self.default_source_home(), profile_path, selected
+        )
+
+    def sync_profile_hooks(self, profile: str) -> HookSyncResult:
+        """Reapply PROFILE's saved root-hook selection."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        return hooks_mod.sync_saved_hooks(self.default_source_home(), profile_path)
 
     def remove_wrapper(self, profile: str, command_name: str | None = None) -> tuple[Path, bool]:
         """Delete a wrapper command; profile data is left intact."""
