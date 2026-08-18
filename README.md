@@ -37,11 +37,12 @@ codex-work
 ```
 
 During `add`, interactive prompts let you:
-1. Copy plugins/skills from the source home
-2. Copy current config (`auth.json` + `config.toml`)
-3. Select root-profile hooks to share with the new profile
-4. Share sessions with the root home (symlink)
-5. Otherwise migrate sessions into the new profile
+1. Copy plugins/skills/rules from the source home
+2. Copy global instructions (`AGENTS.md` + `AGENTS.override.md`)
+3. Copy current config (`auth.json` + `config.toml`)
+4. Select root-profile hooks to share with the new profile
+5. Share sessions with the root home (symlink)
+6. Otherwise migrate sessions into the new profile
 
 The choices are recorded as ordered sync types. A later `codexalias sync
 <profile>` re-runs the corresponding migration handlers in that order. Pass
@@ -98,6 +99,9 @@ codexalias hooks
 
 # Reapply the profile's saved migration types from the source home
 codexalias sync [profile] [--yes]
+
+# Enable global instruction sync for an existing profile, then sync it
+codexalias sync <profile> --instructions --yes
 ```
 
 `@source` refers to the configured source home; `@current` refers to the current
@@ -154,13 +158,16 @@ hooks are bound to their root plugin directory so `${PLUGIN_ROOT}` continues to
 work outside the plugin's own context.
 
 The ordered migration types chosen during `add` are stored in the profile's
-`.codexalias.json` (`plugins`, `config`, `hooks`, `sessions_shared`, or
-`sessions_migrate`). Running `codexalias sync <profile>` walks those types in
-order and invokes each type's migration logic again. Plugin/config sync asks
-for confirmation before overwriting profile files; pass `--yes` for an explicit
-non-interactive approval. Profile-local hooks are preserved; hook-specific
-ownership snapshots remain internal to the hook migration so changed root hooks
-can be replaced safely.
+`.codexalias.json` (`plugins`, `instructions`, `config`, `hooks`,
+`sessions_shared`, or `sessions_migrate`). Running `codexalias sync <profile>`
+walks those types in order and invokes each type's migration logic again. Use
+`--instructions` once to enable instruction sync for an existing profile.
+Plugin/instruction/config sync asks for confirmation before overwriting profile
+files; pass `--yes` for an explicit non-interactive approval. Instruction sync
+mirrors both global instruction filenames and removes a stale target override
+when it no longer exists in the source home. Profile-local hooks are preserved;
+hook-specific ownership snapshots remain internal to the hook migration so
+changed root hooks can be replaced safely.
 
 ## Library usage
 

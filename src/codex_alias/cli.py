@@ -115,9 +115,12 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
     source = mgr.config.source_home
     ui.info(f"Bootstrap from source home: {source}")
 
-    if ui.confirm("Copy plugins/skills from source home?"):
+    if ui.confirm("Copy plugins/skills/rules from source home?"):
         _copy_plugin_dirs(source, profile_path)
         mgr.record_profile_sync_type(profile_path.name, "plugins")
+    if ui.confirm("Copy global instructions (AGENTS.md + AGENTS.override.md)?"):
+        _copy_instruction_files(source, profile_path)
+        mgr.record_profile_sync_type(profile_path.name, "instructions")
     if ui.confirm("Copy current config (auth.json + config.toml)?"):
         _copy_core_config(source, profile_path)
         mgr.record_profile_sync_type(profile_path.name, "config")
@@ -131,7 +134,19 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
         mgr.record_profile_sync_type(profile_path.name, "sessions_migrate")
 
 
-_PLUGIN_DIRS = ("skills", ".skills", "plugins", ".plugins", ".agents", "agents", "mcp", ".mcp")
+_PLUGIN_DIRS = (
+    "skills",
+    ".skills",
+    "plugins",
+    ".plugins",
+    ".agents",
+    "agents",
+    "mcp",
+    ".mcp",
+    "rules",
+    "prompts",
+)
+_INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")
 _CORE_CONFIG = ("auth.json", "config.toml")
 
 
@@ -147,6 +162,31 @@ def _copy_plugin_dirs(src: Path, dst: Path) -> None:
             copied = True
     if not copied:
         ui.info(f"No plugin directories found in {src}.")
+
+
+def _copy_instruction_files(src: Path, dst: Path) -> None:
+    """Mirror global instruction files, including removal of stale overrides."""
+    import shutil
+
+    if src.resolve() == dst.resolve():
+        ui.info(f"Instruction source and target are the same, skipped: {src}")
+        return
+
+    changed = False
+    for name in _INSTRUCTION_FILES:
+        src_file = src / name
+        dst_file = dst / name
+        if src_file.is_file():
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            ui.success(f"Copied instruction file: {name}")
+            changed = True
+        elif dst_file.is_file() or dst_file.is_symlink():
+            dst_file.unlink()
+            ui.success(f"Removed stale instruction file: {name}")
+            changed = True
+    if not changed:
+        ui.info(f"No global instruction files found in {src}.")
 
 
 def _copy_core_config(src: Path, dst: Path) -> None:
@@ -170,6 +210,10 @@ def _sync_plugins(mgr: CodexAlias, profile_path: Path) -> None:
     _copy_plugin_dirs(mgr.config.source_home, profile_path)
 
 
+def _sync_instructions(mgr: CodexAlias, profile_path: Path) -> None:
+    _copy_instruction_files(mgr.config.source_home, profile_path)
+
+
 def _sync_config(mgr: CodexAlias, profile_path: Path) -> None:
     _copy_core_config(mgr.config.source_home, profile_path)
 
@@ -189,13 +233,14 @@ def _sync_migrated_sessions(mgr: CodexAlias, profile_path: Path) -> None:
 
 _SYNC_MIGRATIONS = {
     "plugins": _sync_plugins,
+    "instructions": _sync_instructions,
     "config": _sync_config,
     "hooks": _sync_hooks,
     "sessions_shared": _sync_shared_sessions,
     "sessions_migrate": _sync_migrated_sessions,
 }
 
-_SYNC_CONFIRM_TYPES = {"plugins", "config"}
+_SYNC_CONFIRM_TYPES = {"plugins", "instructions", "config"}
 
 
 def _sync_profile(mgr: CodexAlias, profile: str, *, yes: bool = False) -> None:
@@ -428,8 +473,18 @@ def hooks(ctx: click.Context) -> None:
     is_flag=True,
     help="Skip confirmations for sync types that may overwrite profile files.",
 )
+@click.option(
+    "--instructions",
+    is_flag=True,
+    help="Enable AGENTS.md/AGENTS.override.md sync for this profile.",
+)
 @click.pass_context
-def sync(ctx: click.Context, profile: str | None, yes: bool) -> None:
+def sync(
+    ctx: click.Context,
+    profile: str | None,
+    yes: bool,
+    instructions: bool,
+) -> None:
     """Run the saved profile migration types from the root home in order."""
     mgr = _mgr(ctx)
     selected_profile = profile
@@ -439,6 +494,8 @@ def sync(ctx: click.Context, profile: str | None, yes: bool) -> None:
         selected_profile = _choose_profile(mgr)
     if selected_profile is None:
         return
+    if instructions:
+        mgr.record_profile_sync_type(selected_profile, "instructions")
     sync_types = mgr.profile_sync_types(selected_profile)
     if "sessions_migrate" in sync_types and not sys.stdin.isatty():
         raise click.ClickException(

@@ -319,6 +319,121 @@ def test_sync_config_requires_confirmation_without_yes(tmp_path, monkeypatch) ->
     assert "pass --yes" in result.output
 
 
+def test_sync_instructions_option_mirrors_files_and_records_type(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    source.mkdir()
+    target.mkdir(parents=True)
+    (source / "AGENTS.md").write_text("root instructions\n", encoding="utf-8")
+    (target / "AGENTS.md").write_text("old instructions\n", encoding="utf-8")
+    (target / "AGENTS.override.md").write_text("stale override\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "--instructions", "--yes", "work"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "AGENTS.md").read_text(encoding="utf-8") == "root instructions\n"
+    assert not (target / "AGENTS.override.md").exists()
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["instructions"]
+
+
+def test_add_bootstrap_offers_and_records_instruction_sync(mgr, monkeypatch) -> None:
+    class FakeTty:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    source = mgr.config.source_home
+    source.mkdir(parents=True)
+    (source / "AGENTS.md").write_text("shared instructions\n", encoding="utf-8")
+    mgr.add_profile("work")
+    answers = iter((False, True, False, False, False))
+    prompts: list[str] = []
+
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(cli_module.sys, "stdin", FakeTty())
+    monkeypatch.setattr(cli_module.ui, "confirm", confirm)
+    cli_module._bootstrap_profile(mgr, mgr.config.profile_path("work"))
+
+    target = mgr.config.profile_path("work")
+    assert "Copy global instructions" in prompts[1]
+    assert (target / "AGENTS.md").read_text(encoding="utf-8") == (
+        "shared instructions\n"
+    )
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["instructions"]
+
+
+def test_saved_instruction_sync_copies_override(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    source.mkdir()
+    target.mkdir(parents=True)
+    (source / "AGENTS.md").write_text("base\n", encoding="utf-8")
+    (source / "AGENTS.override.md").write_text("temporary override\n", encoding="utf-8")
+
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "instructions")
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "--yes", "work"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "AGENTS.md").read_text(encoding="utf-8") == "base\n"
+    assert (target / "AGENTS.override.md").read_text(encoding="utf-8") == (
+        "temporary override\n"
+    )
+
+
+def test_instruction_sync_skips_same_source_and_target(tmp_path, monkeypatch) -> None:
+    home = tmp_path / ".codex"
+    home.mkdir()
+    agents = home / "AGENTS.md"
+    agents.write_text("keep me\n", encoding="utf-8")
+    messages: list[str] = []
+    monkeypatch.setattr(cli_module.ui, "info", messages.append)
+
+    cli_module._copy_instruction_files(home, home)
+
+    assert agents.read_text(encoding="utf-8") == "keep me\n"
+    assert messages == [f"Instruction source and target are the same, skipped: {home}"]
+
+
+def test_plugin_sync_includes_rules_and_legacy_prompts(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".codex"
+    target = tmp_path / "profile"
+    (source / "rules").mkdir(parents=True)
+    (source / "rules" / "default.rules").write_text("rule\n", encoding="utf-8")
+    (source / "prompts").mkdir()
+    (source / "prompts" / "review.md").write_text("prompt\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module.ui, "success", lambda _message: None)
+
+    cli_module._copy_plugin_dirs(source, target)
+
+    assert (target / "rules" / "default.rules").read_text(encoding="utf-8") == "rule\n"
+    assert (target / "prompts" / "review.md").read_text(encoding="utf-8") == "prompt\n"
+
+
 def test_record_sync_type_is_idempotent_and_preserves_order(mgr: CodexAlias) -> None:
     mgr.add_profile("work")
 
