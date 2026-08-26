@@ -40,6 +40,7 @@ from .models import (
     SessionFixResult,
 )
 from . import hooks as hooks_mod
+from . import profile_state
 from . import sessions as sessions_mod
 from .session_mappings import SessionMappingContext
 
@@ -168,22 +169,22 @@ class CodexAlias:
     def record_profile_sync_type(self, profile: str, sync_type: str) -> None:
         """Remember that PROFILE should run one migration type during sync."""
         profile_path = self.profile_home(profile, must_exist=True)
-        hooks_mod.record_sync_type(profile_path, sync_type)
+        profile_state.record_sync_type(profile_path, sync_type)
 
     def remove_profile_sync_type(self, profile: str, sync_type: str) -> None:
         """Forget one saved migration type for PROFILE."""
         profile_path = self.profile_home(profile, must_exist=True)
-        hooks_mod.remove_sync_type(profile_path, sync_type)
+        profile_state.remove_sync_type(profile_path, sync_type)
 
     def profile_sync_types(self, profile: str) -> tuple[str, ...]:
         """Return PROFILE's ordered migration types, if any were recorded."""
         profile_path = self.profile_home(profile, must_exist=True)
-        return hooks_mod.saved_sync_types(profile_path)
+        return profile_state.saved_sync_types(profile_path)
 
     def profile_skill_sync_options(self, profile: str) -> dict[str, object] | None:
         """Return PROFILE's persisted skill selector, if one exists."""
         profile_path = self.profile_home(profile, must_exist=True)
-        return hooks_mod.saved_skill_sync_options(profile_path)
+        return profile_state.saved_skill_sync_options(profile_path)
 
     def record_profile_skill_sync_options(
         self,
@@ -196,7 +197,7 @@ class CodexAlias:
     ) -> None:
         """Persist PROFILE's skill selector and enable skill synchronization."""
         profile_path = self.profile_home(profile, must_exist=True)
-        hooks_mod.record_skill_sync_options(
+        profile_state.record_skill_sync_options(
             profile_path,
             include=include,
             exclude=exclude,
@@ -545,11 +546,12 @@ class CodexAlias:
         """
         profile_path = self.profile_home(profile, must_exist=True)
         source_home = self.resolve_home_ref(source_ref).path
-        actions = self._link_shared(profile_path, source_home)
-        hooks_mod.record_sync_type(profile_path, "sessions_shared")
+        actions = self.link_shared(profile_path, source_home)
+        profile_state.record_sync_type(profile_path, "sessions_shared")
         return actions
 
-    def _link_shared(self, profile_path: Path, source_home: Path) -> list[LinkAction]:
+    def link_shared(self, profile_path: Path, source_home: Path) -> list[LinkAction]:
+        """Link session artifacts without changing the profile sync state."""
         actions: list[LinkAction] = []
         sessions_link = profile_path / "sessions"
         source_sessions = source_home / "sessions"
@@ -586,6 +588,11 @@ class CodexAlias:
             actions.append(LinkAction(f"Linked {target_db} -> {source_db}"))
 
         return actions
+
+    # Kept as a compatibility shim for callers that used the old internal
+    # helper. New code should use :meth:`link_shared` or :meth:`share_sessions`.
+    def _link_shared(self, profile_path: Path, source_home: Path) -> list[LinkAction]:
+        return self.link_shared(profile_path, source_home)
 
     # ----------------------------------------------------------------- doctor
 

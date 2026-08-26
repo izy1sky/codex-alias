@@ -654,6 +654,77 @@ def test_skills_sync_can_persist_selector_and_prune_stale_user_skills(tmp_path) 
     assert (target / "skills" / ".system").is_dir()
 
 
+def test_skill_selector_replaces_saved_bundle_before_future_sync(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    for name in ("keep", "drop"):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(name, encoding="utf-8")
+    target.mkdir(parents=True)
+    env = {
+        "HOME": str(tmp_path),
+        "CODEXALIAS_SOURCE_HOME": str(source),
+        "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+    }
+
+    bundle = CliRunner().invoke(
+        cli, ["sync", "work", "--type", "bundle", "--save", "--yes"], env=env
+    )
+    assert bundle.exit_code == 0, bundle.output
+    assert (target / "skills" / "drop").is_dir()
+
+    selected = CliRunner().invoke(
+        cli,
+        [
+            "sync",
+            "work",
+            "--type",
+            "skills",
+            "--skill",
+            "keep",
+            "--prune-skills",
+            "--save",
+            "--yes",
+        ],
+        env=env,
+    )
+    assert selected.exit_code == 0, selected.output
+
+    future = CliRunner().invoke(cli, ["sync", "work", "--yes"], env=env)
+    assert future.exit_code == 0, future.output
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["skills"]
+    assert not (target / "skills" / "drop").exists()
+
+
+def test_sync_save_does_not_write_state_when_resource_copy_fails(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    (source / "skills" / "keep").mkdir(parents=True)
+    target.mkdir(parents=True)
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(cli_module, "_copy_skills", fail_copy)
+
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--type", "skills", "--skill", "keep", "--save", "--yes"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code != 0
+    assert not (target / ".codexalias.json").exists()
+
+
 def test_skills_listing_and_plugin_only_sync_are_separate(tmp_path) -> None:
     source = tmp_path / ".codex"
     profile_root = tmp_path / "profiles"

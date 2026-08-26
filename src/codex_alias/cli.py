@@ -16,9 +16,11 @@ from pathlib import Path
 import click
 
 from . import __version__, ui
+from . import syncing
 from .config import Config
 from .errors import CodexAliasError, SessionLossyMappingError
 from .manager import REF_CURRENT, REF_SOURCE, CodexAlias
+from .profile_state import LEGACY_BUNDLE_TYPES
 
 
 def _mgr(ctx: click.Context) -> CodexAlias:
@@ -145,7 +147,7 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
         mgr.record_profile_sync_type(profile_path.name, "config")
     _configure_profile_hooks(mgr, profile_path.name)
     if ui.confirm("Share sessions with root home (symlink)?"):
-        for action in mgr._link_shared(profile_path, source):
+        for action in mgr.link_shared(profile_path, source):
             ui.success(action.message)
         mgr.record_profile_sync_type(profile_path.name, "sessions_shared")
     elif ui.confirm("Migrate sessions into this profile?"):
@@ -153,26 +155,10 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
         mgr.record_profile_sync_type(profile_path.name, "sessions_migrate")
 
 
-_SKILL_DIRS = (
-    "skills",
-    ".skills",
-)
-_PLUGIN_ONLY_DIRS = (
-    "plugins",
-    ".plugins",
-)
-_AGENT_DIRS = (".agents", "agents")
-_MCP_DIRS = ("mcp", ".mcp")
-_LEGACY_PLUGIN_DIRS = (
-    *_SKILL_DIRS,
-    *_PLUGIN_ONLY_DIRS,
-    *_AGENT_DIRS,
-    *_MCP_DIRS,
-    "rules",
-    "prompts",
-)
-_INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")
-_CORE_CONFIG = ("auth.json", "config.toml")
+def _render_sync_messages(messages: tuple[syncing.SyncMessage, ...]) -> None:
+    renderers = {"info": ui.info, "success": ui.success, "warn": ui.warn}
+    for message in messages:
+        renderers[message.level](message.text)
 
 
 def _copy_resource_dirs(
@@ -183,87 +169,49 @@ def _copy_resource_dirs(
     dry_run: bool = False,
     label: str = "resource",
 ) -> None:
-    import shutil
-
-    copied = False
-    for name in names:
-        src_dir = src / name
-        if src_dir.is_dir():
-            if dry_run:
-                ui.info(f"Would copy {label} dir: {name}")
-            else:
-                shutil.copytree(src_dir, dst / name, dirs_exist_ok=True)
-                ui.success(f"Copied {label} dir: {name}")
-            copied = True
-    if not copied:
-        ui.info(f"No {label} directories found in {src}.")
+    _render_sync_messages(
+        syncing.copy_resource_dirs(src, dst, names, dry_run=dry_run, label=label)
+    )
 
 
 def _copy_plugin_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
     """Copy the historical all-in-one plugin resource bundle."""
-    _copy_resource_dirs(src, dst, _LEGACY_PLUGIN_DIRS, dry_run=dry_run, label="plugin")
+    _render_sync_messages(syncing.copy_plugin_dirs(src, dst, dry_run=dry_run))
 
 
 def _copy_plugin_only_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _copy_resource_dirs(
-        src, dst, _PLUGIN_ONLY_DIRS, dry_run=dry_run, label="plugin"
-    )
+    _render_sync_messages(syncing.copy_plugin_only_dirs(src, dst, dry_run=dry_run))
 
 
 def _copy_agents_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _copy_resource_dirs(src, dst, _AGENT_DIRS, dry_run=dry_run, label="agent")
+    _render_sync_messages(syncing.copy_agents_dirs(src, dst, dry_run=dry_run))
 
 
 def _copy_mcp_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _copy_resource_dirs(src, dst, _MCP_DIRS, dry_run=dry_run, label="MCP")
+    _render_sync_messages(syncing.copy_mcp_dirs(src, dst, dry_run=dry_run))
 
 
 def _skill_selector_name(value: str, option: str) -> str:
-    value = value.strip()
-    path = Path(value)
-    if (
-        not value
-        or path.is_absolute()
-        or len(path.parts) != 1
-        or path.parts[0] in {".", ".."}
-    ):
-        raise click.ClickException(
-            f"{option} accepts a top-level skill directory name, got {value!r}"
-        )
-    return value
+    try:
+        return syncing.validate_skill_name(value, option)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _read_skills_file(path: Path) -> tuple[str, ...]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise click.ClickException(f"failed to read skills file {path}: {exc}") from exc
-    names: list[str] = []
-    for line in lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        names.append(_skill_selector_name(value, "--skills-file"))
-    return tuple(dict.fromkeys(names))
+        return syncing.read_skills_file(path)
+    except (OSError, ValueError) as exc:
+        message = (
+            f"failed to read skills file {path}: {exc}"
+            if isinstance(exc, OSError)
+            else str(exc)
+        )
+        raise click.ClickException(message) from exc
 
 
-def _source_skill_names(
-    src: Path,
-    *,
-    include_system: bool = False,
-) -> tuple[str, ...]:
-    names: set[str] = set()
-    for dirname in _SKILL_DIRS:
-        source_dir = src / dirname
-        if not source_dir.is_dir():
-            continue
-        for entry in source_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            if entry.name.startswith(".") and not include_system:
-                continue
-            names.add(entry.name)
-    return tuple(sorted(names))
+def _source_skill_names(src: Path, *, include_system: bool = False) -> tuple[str, ...]:
+    return syncing.source_skill_names(src, include_system=include_system)
 
 
 def _selected_skill_names(
@@ -273,31 +221,15 @@ def _selected_skill_names(
     exclude: tuple[str, ...],
     include_system: bool,
 ) -> tuple[str, ...]:
-    available = set(_source_skill_names(src, include_system=include_system))
-    if include:
-        missing = sorted(set(include) - available)
-        if missing:
-            raise click.ClickException(
-                "skill(s) not found in source home: " + ", ".join(missing)
-            )
-        selected = set(include)
-    else:
-        selected = available
-    selected.difference_update(exclude)
-    return tuple(sorted(selected))
-
-
-def _remove_skill_entry(path: Path, *, dry_run: bool) -> None:
-    import shutil
-
-    if dry_run:
-        ui.warn(f"Would remove stale skill: {path}")
-        return
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.is_dir():
-        shutil.rmtree(path)
-    ui.warn(f"Removed stale skill: {path}")
+    try:
+        return syncing.selected_skill_names(
+            src,
+            include=include,
+            exclude=exclude,
+            include_system=include_system,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _copy_skills(
@@ -310,53 +242,19 @@ def _copy_skills(
     prune: bool = False,
     dry_run: bool = False,
 ) -> None:
-    import shutil
-
-    selected = set(
-        _selected_skill_names(
+    try:
+        messages = syncing.copy_skills(
             src,
+            dst,
             include=include,
             exclude=exclude,
             include_system=include_system,
+            prune=prune,
+            dry_run=dry_run,
         )
-    )
-    copied = False
-    for dirname in _SKILL_DIRS:
-        source_dir = src / dirname
-        if not source_dir.is_dir():
-            continue
-        target_dir = dst / dirname
-        source_names = {
-            entry.name
-            for entry in source_dir.iterdir()
-            if entry.is_dir() and entry.name in selected
-        }
-        for name in sorted(source_names):
-            source_entry = source_dir / name
-            target_entry = target_dir / name
-            if dry_run:
-                ui.info(f"Would copy skill: {dirname}/{name}")
-            else:
-                shutil.copytree(source_entry, target_entry, dirs_exist_ok=True)
-                ui.success(f"Copied skill: {dirname}/{name}")
-            copied = True
-
-        if not prune or not target_dir.is_dir():
-            continue
-        for target_entry in sorted(target_dir.iterdir()):
-            # Codex owns .system; never remove it through profile syncing.
-            if target_entry.name == ".system":
-                continue
-            # Skill roots may also contain migration manifests or other
-            # metadata files. Only directories (including directory symlinks)
-            # represent removable skill packages.
-            if not target_entry.is_dir():
-                continue
-            if target_entry.name not in selected:
-                _remove_skill_entry(target_entry, dry_run=dry_run)
-
-    if not copied and not prune:
-        ui.info(f"No selected skills found in {src}.")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _render_sync_messages(messages)
 
 
 def _interactive_skill_selection(
@@ -393,53 +291,13 @@ def _copy_instruction_files(
     src: Path, dst: Path, *, dry_run: bool = False
 ) -> None:
     """Mirror global instruction files, including removal of stale overrides."""
-    import shutil
-
-    if src.resolve() == dst.resolve():
-        ui.info(f"Instruction source and target are the same, skipped: {src}")
-        return
-
-    changed = False
-    for name in _INSTRUCTION_FILES:
-        src_file = src / name
-        dst_file = dst / name
-        if src_file.is_file():
-            if dry_run:
-                ui.info(f"Would copy instruction file: {name}")
-            else:
-                dst.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dst_file)
-                ui.success(f"Copied instruction file: {name}")
-            changed = True
-        elif dst_file.is_file() or dst_file.is_symlink():
-            if dry_run:
-                ui.info(f"Would remove stale instruction file: {name}")
-            else:
-                dst_file.unlink()
-                ui.success(f"Removed stale instruction file: {name}")
-            changed = True
-    if not changed:
-        ui.info(f"No global instruction files found in {src}.")
+    _render_sync_messages(
+        syncing.copy_instruction_files(src, dst, dry_run=dry_run)
+    )
 
 
 def _copy_core_config(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    import shutil
-
-    copied = False
-    for name in _CORE_CONFIG:
-        src_file = src / name
-        if src_file.is_file():
-            if dry_run:
-                ui.info(f"Would copy config file: {name}")
-            else:
-                dst.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src_file, dst / name)
-                ui.success(f"Copied config file: {name}")
-            copied = True
-        else:
-            ui.info(f"Missing config file, skipped: {src_file}")
-    if not copied:
-        ui.info("No config files copied.")
+    _render_sync_messages(syncing.copy_core_config(src, dst, dry_run=dry_run))
 
 
 def _sync_plugins(
@@ -517,7 +375,7 @@ def _sync_hooks(mgr: CodexAlias, profile_path: Path) -> None:
 
 
 def _sync_shared_sessions(mgr: CodexAlias, profile_path: Path) -> None:
-    for action in mgr._link_shared(profile_path, mgr.config.source_home):
+    for action in mgr.link_shared(profile_path, mgr.config.source_home):
         ui.success(action.message)
 
 
@@ -541,32 +399,9 @@ _SYNC_MIGRATIONS = {
     "sessions_migrate": _sync_migrated_sessions,
 }
 
-_SYNC_TYPE_DESCRIPTIONS = {
-    "skills": "selected skill packages (excludes .system by default)",
-    "agents": ".agents and agents directories",
-    "mcp": "mcp and .mcp directories",
-    "plugins": "plugins and .plugins directories only",
-    "bundle": "legacy bundle: skills, plugins, agents, MCP, rules, prompts",
-    "rules": "rules directory",
-    "prompts": "prompts directory",
-    "instructions": "AGENTS.md and AGENTS.override.md",
-    "config": "auth.json and config.toml",
-    "hooks": "the profile's saved root-hook selection",
-    "sessions_shared": "shared session symlinks to the source home",
-    "sessions_migrate": "interactive session migration",
-}
-
-_SYNC_CONFIRM_TYPES = {
-    "skills",
-    "plugins-only",
-    "bundle",
-    "plugins",
-    "rules",
-    "prompts",
-    "instructions",
-    "config",
-}
-_SYNC_TYPE_CHOICES = tuple(_SYNC_TYPE_DESCRIPTIONS)
+_SYNC_TYPE_DESCRIPTIONS = syncing.SYNC_TYPE_DESCRIPTIONS
+_SYNC_CONFIRM_TYPES = syncing.SYNC_CONFIRM_TYPES
+_SYNC_TYPE_CHOICES = syncing.SYNC_TYPE_CHOICES
 
 
 def _sync_profile(
@@ -580,11 +415,14 @@ def _sync_profile(
     include_system_skills: bool = False,
     prune_skills: bool = False,
     dry_run: bool = False,
+    extra_sync_types: tuple[str, ...] = (),
 ) -> None:
     """Run explicit or saved migrations for PROFILE in the given order."""
     profile_path = mgr.profile_home(profile, must_exist=True)
     saved_mode = sync_types is None
     selected_types = mgr.profile_sync_types(profile) if saved_mode else sync_types
+    if saved_mode and extra_sync_types:
+        selected_types = tuple(dict.fromkeys((*selected_types, *extra_sync_types)))
     if not selected_types:
         ui.info(f"No saved sync types for profile '{profile}'.")
         return
@@ -645,6 +483,44 @@ def _sync_profile(
             # Keep the two-argument call for third-party/test migrations that
             # predate the dry-run keyword.
             migration(mgr, profile_path)
+
+
+def _persist_sync_configuration(
+    mgr: CodexAlias,
+    profile: str,
+    *,
+    sync_types: tuple[str, ...],
+    includes: tuple[str, ...],
+    excludes: tuple[str, ...],
+    include_system_skills: bool,
+    prune_skills: bool,
+    persist: bool,
+    instructions: bool,
+) -> None:
+    """Persist a successful sync plan after its filesystem work completes."""
+    if instructions:
+        mgr.record_profile_sync_type(profile, "instructions")
+    if not persist:
+        return
+
+    for sync_type in sync_types:
+        if sync_type in syncing.GRANULAR_SYNC_TYPES and sync_type != "skills":
+            for legacy_type in LEGACY_BUNDLE_TYPES:
+                mgr.remove_profile_sync_type(profile, legacy_type)
+        if sync_type == "skills":
+            mgr.record_profile_skill_sync_options(
+                profile,
+                include=includes,
+                exclude=excludes,
+                include_system=include_system_skills,
+                prune=prune_skills,
+            )
+            continue
+
+        # ``plugins`` is reserved for old profiles where it means the full
+        # bundle; a newly persisted explicit plugin sync is plugin-only.
+        saved_type = "plugins-only" if sync_type == "plugins" else sync_type
+        mgr.record_profile_sync_type(profile, saved_type)
 
 
 @click.group(
@@ -1074,6 +950,11 @@ def sync(
             return
         selected_profiles = [selected_profile]
 
+    # Resolve every target before changing any of them. This avoids a partial
+    # multi-profile run when one of the requested profile names is invalid.
+    for selected_profile in selected_profiles:
+        mgr.profile_home(selected_profile, must_exist=True)
+
     if select_skills:
         selection = _interactive_skill_selection(mgr, selected_profiles)
         if selection is None:
@@ -1094,12 +975,14 @@ def sync(
             include_system=include_system_skills,
         )
 
+    completed_profiles: list[str] = []
     for selected_profile in selected_profiles:
-        if instructions and not dry_run:
-            mgr.record_profile_sync_type(selected_profile, "instructions")
         active_types = one_shot_types or mgr.profile_sync_types(selected_profile)
-        if instructions and dry_run and not one_shot_types:
-            active_types = tuple(dict.fromkeys((*active_types, "instructions")))
+        extra_sync_types = (
+            ("instructions",) if instructions and not one_shot_types else ()
+        )
+        if extra_sync_types:
+            active_types = tuple(dict.fromkeys((*active_types, *extra_sync_types)))
         if has_skill_selector and "skills" not in active_types:
             raise click.UsageError(
                 f"profile '{selected_profile}' has no skills sync type selected"
@@ -1115,36 +998,6 @@ def sync(
             raise click.UsageError(
                 "--dry-run only supports file/resource sync types, not hooks or sessions"
             )
-        if persist:
-            for sync_type in one_shot_types:
-                if sync_type in {
-                    "skills",
-                    "plugins",
-                    "agents",
-                    "mcp",
-                    "rules",
-                    "prompts",
-                }:
-                    # A granular save supersedes the historical all-in-one
-                    # entry; otherwise a later saved sync would reintroduce
-                    # every skill despite the allowlist.
-                    mgr.remove_profile_sync_type(selected_profile, "plugins")
-                if sync_type == "skills":
-                    mgr.record_profile_skill_sync_options(
-                        selected_profile,
-                        include=includes,
-                        exclude=excludes,
-                        include_system=include_system_skills,
-                        prune=prune_skills,
-                    )
-                else:
-                    # Do not persist explicit plugin-only intent under the
-                    # historical ``plugins`` key; that key is reserved for
-                    # old profiles whose value means the full bundle.
-                    saved_type = (
-                        "plugins-only" if sync_type == "plugins" else sync_type
-                    )
-                    mgr.record_profile_sync_type(selected_profile, saved_type)
         if "sessions_migrate" in active_types and not sys.stdin.isatty():
             raise click.ClickException(
                 "sync with session migration requires a TTY"
@@ -1159,7 +1012,23 @@ def sync(
             include_system_skills=include_system_skills,
             prune_skills=prune_skills,
             dry_run=dry_run,
+            extra_sync_types=extra_sync_types,
         )
+        completed_profiles.append(selected_profile)
+
+    if not dry_run and (instructions or persist):
+        for selected_profile in completed_profiles:
+            _persist_sync_configuration(
+                mgr,
+                selected_profile,
+                sync_types=one_shot_types,
+                includes=includes,
+                excludes=excludes,
+                include_system_skills=include_system_skills,
+                prune_skills=prune_skills,
+                persist=persist,
+                instructions=instructions,
+            )
 
 
 @cli.command(name="import")
