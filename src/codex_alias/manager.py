@@ -9,9 +9,7 @@ in the caller.
 from __future__ import annotations
 
 import os
-import re
 import shutil
-import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,8 +18,6 @@ from .errors import (
     AmbiguousSessionError,
     CodexAliasError,
     HomeNotFoundError,
-    InvalidNameError,
-    ProfileNotFoundError,
     SessionNotFoundError,
     SessionRepairError,
 )
@@ -42,9 +38,10 @@ from .models import (
 from . import hooks as hooks_mod
 from . import profile_state
 from . import sessions as sessions_mod
+from .launcher import ProfileLauncher
+from .profile_service import ProfileStore
 from .session_mappings import SessionMappingContext
-
-_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+from .validation import validate_name
 _SHARED_DBS = ("state_5.sqlite", "logs_1.sqlite")
 
 # Reference tokens accepted anywhere a home/profile is expected.
@@ -52,19 +49,11 @@ REF_SOURCE = "@source"
 REF_CURRENT = "@current"
 
 
-def validate_name(value: str, label: str) -> str:
-    """Guard against path traversal and shell-hostile names."""
-    if not value or not _NAME_RE.match(value):
-        raise InvalidNameError(
-            f"invalid {label} {value!r}. Allowed: letters, numbers, dot, "
-            "underscore, dash."
-        )
-    return value
-
-
 class CodexAlias:
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.launcher = ProfileLauncher(config)
+        self.profile_store = ProfileStore(config, self.launcher)
 
     # ------------------------------------------------------------------ homes
 
@@ -112,41 +101,14 @@ class CodexAlias:
     # --------------------------------------------------------------- profiles
 
     def list_profiles(self) -> list[Profile]:
-        root = self.config.profile_root
-        if not root.is_dir():
-            return []
-        out: list[Profile] = []
-        for path in sorted(p for p in root.iterdir() if p.is_dir()):
-            out.append(
-                Profile(
-                    name=path.name,
-                    path=path,
-                    sessions_shared=(path / "sessions").is_symlink(),
-                )
-            )
-        return out
+        return self.profile_store.list_profiles()
 
     def profile_home(self, profile: str, *, must_exist: bool = False) -> Path:
-        validate_name(profile, "profile")
-        path = self.config.profile_path(profile)
-        if must_exist and not path.is_dir():
-            raise ProfileNotFoundError(f"profile not found: {path}")
-        return path
+        return self.profile_store.profile_home(profile, must_exist=must_exist)
 
     def add_profile(self, profile: str, command_name: str | None = None) -> Path:
         """Create a profile home and its wrapper command; return wrapper path."""
-        validate_name(profile, "profile")
-        command_name = command_name or f"codex-{profile}"
-        validate_name(command_name, "command name")
-
-        profile_path = self.config.profile_path(profile)
-        profile_path.mkdir(parents=True, exist_ok=True)
-        self.config.bin_dir.mkdir(parents=True, exist_ok=True)
-
-        target = self.config.wrapper_path(command_name)
-        target.write_text(self._wrapper_script(profile), encoding="utf-8")
-        target.chmod(target.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        return target
+        return self.profile_store.add_profile(profile, command_name)
 
     def root_hooks_path(self) -> Path:
         """Return the hooks file belonging to the configured source home."""
@@ -212,14 +174,7 @@ class CodexAlias:
 
     def remove_wrapper(self, profile: str, command_name: str | None = None) -> tuple[Path, bool]:
         """Delete a wrapper command; profile data is left intact."""
-        validate_name(profile, "profile")
-        command_name = command_name or f"codex-{profile}"
-        validate_name(command_name, "command name")
-        target = self.config.wrapper_path(command_name)
-        if target.exists():
-            target.unlink()
-            return target, True
-        return target, False
+        return self.profile_store.remove_wrapper(profile, command_name)
 
     def remove_profile(
         self,
@@ -233,116 +188,37 @@ class CodexAlias:
         Deleting a home is refused when it is the configured source home or the
         current ``CODEX_HOME``, since removing either would break the tool.
         """
-        validate_name(profile, "profile")
-        command_name = command_name or f"codex-{profile}"
-        validate_name(command_name, "command name")
-
-        profile_path = self.config.profile_path(profile)
-        if not keep_data:
-            if not profile_path.is_dir():
-                raise ProfileNotFoundError(f"profile not found: {profile_path}")
-            resolved = self._safe_resolve(profile_path)
-            if resolved == self._safe_resolve(self.config.source_home):
-                raise CodexAliasError(
-                    f"refusing to remove {profile_path}: it is the configured source home"
-                )
-            if resolved == self._safe_resolve(self.current_home()):
-                raise CodexAliasError(
-                    f"refusing to remove {profile_path}: it is the current CODEX_HOME"
-                )
-
-        wrapper_path = self.config.wrapper_path(command_name)
-        wrapper_removed = False
-        if wrapper_path.exists():
-            wrapper_path.unlink()
-            wrapper_removed = True
-
-        home_removed = False
-        if not keep_data:
-            home_removed = self._remove_home(profile_path)
-
-        return ProfileRemoveResult(
-            profile=profile,
-            profile_path=profile_path,
-            wrapper_path=wrapper_path,
-            wrapper_removed=wrapper_removed,
-            home_removed=home_removed,
+        return self.profile_store.remove_profile(
+            profile,
+            command_name,
+            keep_data=keep_data,
+            source_home=self.config.source_home,
+            current_home=self.current_home(),
         )
-
-    def _remove_home(self, profile_path: Path) -> bool:
-        """Delete a profile home after verifying it lives under the profile root."""
-        root = self._safe_resolve(self.config.profile_root)
-        if root not in self._safe_resolve(profile_path).parents:
-            raise CodexAliasError(f"refusing to remove path outside profile root: {profile_path}")
-        if profile_path.is_symlink():
-            profile_path.unlink()
-            return True
-        if not profile_path.is_dir():
-            return False
-        shutil.rmtree(profile_path)
-        return True
 
     def run_argv(self, profile: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         """Build the argv and environment to exec ``codex`` under ``profile``.
 
         Returns without executing so the caller controls process replacement.
         """
-        validate_name(profile, "profile")
-        profile_path = self.config.profile_path(profile)
-        profile_path.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        env["CODEX_HOME"] = str(profile_path)
-        return self._codex_argv(args), env
+        return self.launcher.run_argv(profile, args)
 
     def resume_argv(
         self, home: Path, session_id: str
     ) -> tuple[list[str], dict[str, str]]:
         """Build a resume invocation through the configured Codex wrapper."""
-        env = dict(os.environ)
-        env["CODEX_HOME"] = str(home)
-        return self._codex_argv(["resume", session_id]), env
+        return self.launcher.resume_argv(home, session_id)
 
+    # Kept as compatibility shims for callers that used the old internals.
     def _codex_argv(self, args: list[str]) -> list[str]:
-        """Build a launch that resolves ``codex`` like the user's shell does.
-
-        Shell functions and aliases are process-local and cannot be inherited
-        by the generated executable wrappers.  Starting the login shell in
-        interactive command mode recreates that normal command resolution,
-        including PATH-based wrappers such as Superset.  Explicit codexalias
-        command/wrapper configuration remains an escape hatch and is executed
-        directly for backwards compatibility.
-        """
-        fixed_args = [*self.config.codex_args, *args]
-        if self.config.codex_wrapper or self.config.codex_cmd != "codex":
-            return [self.config.effective_codex_cmd, *fixed_args]
-
-        shell = os.environ.get("SHELL")
-        if not shell:
-            return ["codex", *fixed_args]
-
-        shell_name = Path(shell).name
-        if shell_name == "fish":
-            # ``--`` prevents leading Codex flags from being consumed as fish
-            # interpreter options; arguments after it populate fish's $argv.
-            return [shell, "-ic", "codex $argv", "--", *fixed_args]
-        if shell_name in {"sh", "bash", "zsh", "dash", "ksh"}:
-            # The first argument after the command string becomes $0; the
-            # remaining arguments are exposed through "$@".
-            return [shell, "-ic", 'codex "$@"', "codex", *fixed_args]
-
-        # Unknown shell syntax is safer to bypass than to guess.
-        return ["codex", *fixed_args]
+        return self.launcher.codex_argv(args)
 
     def _wrapper_script(self, profile: str) -> str:
-        return (
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f'exec "${{CODEXALIAS_MANAGER_BIN_NAME:-codexalias}}" run {profile} "$@"\n'
-        )
+        return self.launcher.wrapper_script(profile)
 
     def refresh_wrappers(self) -> list[Path]:
         """Regenerate default wrapper commands for every existing profile."""
-        return [self.add_profile(profile.name) for profile in self.list_profiles()]
+        return self.profile_store.refresh_wrappers()
 
     # --------------------------------------------------------------- sessions
 
