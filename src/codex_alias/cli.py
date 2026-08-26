@@ -16,11 +16,10 @@ from pathlib import Path
 import click
 
 from . import __version__, ui
-from . import syncing
+from . import sync_service
 from .config import Config
 from .errors import CodexAliasError, SessionLossyMappingError
 from .manager import REF_CURRENT, REF_SOURCE, CodexAlias
-from .profile_state import LEGACY_BUNDLE_TYPES
 
 
 def _mgr(ctx: click.Context) -> CodexAlias:
@@ -155,7 +154,7 @@ def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
         mgr.record_profile_sync_type(profile_path.name, "sessions_migrate")
 
 
-def _render_sync_messages(messages: tuple[syncing.SyncMessage, ...]) -> None:
+def _render_sync_messages(messages: tuple[sync_service.SyncMessage, ...]) -> None:
     renderers = {"info": ui.info, "success": ui.success, "warn": ui.warn}
     for message in messages:
         renderers[message.level](message.text)
@@ -170,37 +169,39 @@ def _copy_resource_dirs(
     label: str = "resource",
 ) -> None:
     _render_sync_messages(
-        syncing.copy_resource_dirs(src, dst, names, dry_run=dry_run, label=label)
+        sync_service.copy_resource_dirs(src, dst, names, dry_run=dry_run, label=label)
     )
 
 
 def _copy_plugin_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
     """Copy the historical all-in-one plugin resource bundle."""
-    _render_sync_messages(syncing.copy_plugin_dirs(src, dst, dry_run=dry_run))
+    _render_sync_messages(sync_service.copy_plugin_dirs(src, dst, dry_run=dry_run))
 
 
 def _copy_plugin_only_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _render_sync_messages(syncing.copy_plugin_only_dirs(src, dst, dry_run=dry_run))
+    _render_sync_messages(
+        sync_service.copy_plugin_only_dirs(src, dst, dry_run=dry_run)
+    )
 
 
 def _copy_agents_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _render_sync_messages(syncing.copy_agents_dirs(src, dst, dry_run=dry_run))
+    _render_sync_messages(sync_service.copy_agents_dirs(src, dst, dry_run=dry_run))
 
 
 def _copy_mcp_dirs(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _render_sync_messages(syncing.copy_mcp_dirs(src, dst, dry_run=dry_run))
+    _render_sync_messages(sync_service.copy_mcp_dirs(src, dst, dry_run=dry_run))
 
 
 def _skill_selector_name(value: str, option: str) -> str:
     try:
-        return syncing.validate_skill_name(value, option)
+        return sync_service.validate_skill_name(value, option)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
 
 def _read_skills_file(path: Path) -> tuple[str, ...]:
     try:
-        return syncing.read_skills_file(path)
+        return sync_service.read_skills_file(path)
     except (OSError, ValueError) as exc:
         message = (
             f"failed to read skills file {path}: {exc}"
@@ -211,7 +212,7 @@ def _read_skills_file(path: Path) -> tuple[str, ...]:
 
 
 def _source_skill_names(src: Path, *, include_system: bool = False) -> tuple[str, ...]:
-    return syncing.source_skill_names(src, include_system=include_system)
+    return sync_service.source_skill_names(src, include_system=include_system)
 
 
 def _selected_skill_names(
@@ -222,7 +223,7 @@ def _selected_skill_names(
     include_system: bool,
 ) -> tuple[str, ...]:
     try:
-        return syncing.selected_skill_names(
+        return sync_service.selected_skill_names(
             src,
             include=include,
             exclude=exclude,
@@ -243,7 +244,7 @@ def _copy_skills(
     dry_run: bool = False,
 ) -> None:
     try:
-        messages = syncing.copy_skills(
+        messages = sync_service.copy_skills(
             src,
             dst,
             include=include,
@@ -292,96 +293,68 @@ def _copy_instruction_files(
 ) -> None:
     """Mirror global instruction files, including removal of stale overrides."""
     _render_sync_messages(
-        syncing.copy_instruction_files(src, dst, dry_run=dry_run)
+        sync_service.copy_instruction_files(src, dst, dry_run=dry_run)
     )
 
 
 def _copy_core_config(src: Path, dst: Path, *, dry_run: bool = False) -> None:
-    _render_sync_messages(syncing.copy_core_config(src, dst, dry_run=dry_run))
+    _render_sync_messages(sync_service.copy_core_config(src, dst, dry_run=dry_run))
 
 
-def _sync_plugins(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_plugin_only_dirs(mgr.config.source_home, profile_path, dry_run=dry_run)
+def _render_sync_event(level: str, text: str) -> None:
+    renderers = {"info": ui.info, "success": ui.success, "warn": ui.warn}
+    renderers[level](text)
 
 
-def _sync_legacy_bundle(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_plugin_dirs(mgr.config.source_home, profile_path, dry_run=dry_run)
+def _confirm_sync(question: str) -> bool:
+    if not sys.stdin.isatty():
+        sync_type = question.removeprefix("Sync ").split(" into profile", 1)[0].lower()
+        raise click.ClickException(
+            f"syncing {sync_type} may overwrite profile files; "
+            "run it from a TTY or pass --yes"
+        )
+    return ui.confirm(question, default=False)
 
 
-def _sync_plugin_only_dirs(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_plugin_only_dirs(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_agents(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_agents_dirs(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_mcp(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_mcp_dirs(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_rules(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_resource_dirs(
-        mgr.config.source_home,
-        profile_path,
-        ("rules",),
-        dry_run=dry_run,
-        label="rules",
+def _sync_service(mgr: CodexAlias) -> sync_service.SyncService:
+    """Build the sync coordinator with this CLI's presentation callbacks."""
+    return sync_service.SyncService(
+        mgr,
+        emit=_render_sync_event,
+        confirm=_confirm_sync,
+        render_hook=ui.render_hook_sync_result,
+        migrate_sessions=_interactive_migrate,
+        copy_skills_callback=_copy_skills,
     )
 
 
-def _sync_prompts(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_resource_dirs(
-        mgr.config.source_home,
-        profile_path,
-        ("prompts",),
-        dry_run=dry_run,
-        label="prompts",
-    )
+def _compat_sync_handler(name: str):
+    """Keep the old private handler names as thin service adapters."""
+    def run(
+        mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
+    ) -> None:
+        handler = _sync_service(mgr).migrations()[name]
+        if name in {"hooks", "sessions_shared", "sessions_migrate"}:
+            handler(mgr, profile_path)
+        else:
+            handler(mgr, profile_path, dry_run=dry_run)
+
+    return run
 
 
-def _sync_instructions(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_instruction_files(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_config(
-    mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False
-) -> None:
-    _copy_core_config(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_skills(mgr: CodexAlias, profile_path: Path, *, dry_run: bool = False) -> None:
-    _copy_skills(mgr.config.source_home, profile_path, dry_run=dry_run)
-
-
-def _sync_hooks(mgr: CodexAlias, profile_path: Path) -> None:
-    ui.render_hook_sync_result(mgr.sync_profile_hooks(profile_path.name))
-
-
-def _sync_shared_sessions(mgr: CodexAlias, profile_path: Path) -> None:
-    for action in mgr.link_shared(profile_path, mgr.config.source_home):
-        ui.success(action.message)
-
-
-def _sync_migrated_sessions(mgr: CodexAlias, profile_path: Path) -> None:
-    _interactive_migrate(mgr, profile_path)
-
+_sync_skills = _compat_sync_handler("skills")
+_sync_plugins = _compat_sync_handler("plugins")
+_sync_legacy_bundle = _compat_sync_handler("bundle")
+_sync_plugin_only_dirs = _compat_sync_handler("plugins-only")
+_sync_agents = _compat_sync_handler("agents")
+_sync_mcp = _compat_sync_handler("mcp")
+_sync_rules = _compat_sync_handler("rules")
+_sync_prompts = _compat_sync_handler("prompts")
+_sync_instructions = _compat_sync_handler("instructions")
+_sync_config = _compat_sync_handler("config")
+_sync_hooks = _compat_sync_handler("hooks")
+_sync_shared_sessions = _compat_sync_handler("sessions_shared")
+_sync_migrated_sessions = _compat_sync_handler("sessions_migrate")
 
 _SYNC_MIGRATIONS = {
     "skills": _sync_skills,
@@ -399,9 +372,9 @@ _SYNC_MIGRATIONS = {
     "sessions_migrate": _sync_migrated_sessions,
 }
 
-_SYNC_TYPE_DESCRIPTIONS = syncing.SYNC_TYPE_DESCRIPTIONS
-_SYNC_CONFIRM_TYPES = syncing.SYNC_CONFIRM_TYPES
-_SYNC_TYPE_CHOICES = syncing.SYNC_TYPE_CHOICES
+_SYNC_TYPE_DESCRIPTIONS = sync_service.SYNC_TYPE_DESCRIPTIONS
+_SYNC_CONFIRM_TYPES = sync_service.SYNC_CONFIRM_TYPES
+_SYNC_TYPE_CHOICES = sync_service.SYNC_TYPE_CHOICES
 
 
 def _sync_profile(
@@ -418,71 +391,21 @@ def _sync_profile(
     extra_sync_types: tuple[str, ...] = (),
 ) -> None:
     """Run explicit or saved migrations for PROFILE in the given order."""
-    profile_path = mgr.profile_home(profile, must_exist=True)
-    saved_mode = sync_types is None
-    selected_types = mgr.profile_sync_types(profile) if saved_mode else sync_types
-    if saved_mode and extra_sync_types:
-        selected_types = tuple(dict.fromkeys((*selected_types, *extra_sync_types)))
-    if not selected_types:
-        ui.info(f"No saved sync types for profile '{profile}'.")
-        return
-    for sync_type in selected_types:
-        migration = _SYNC_MIGRATIONS.get(sync_type)
-        if migration is None:
-            ui.warn(f"Unknown sync type '{sync_type}', skipped.")
-            continue
-        if saved_mode and sync_type == "plugins":
-            # Before granular resource types existed, ``plugins`` meant the
-            # all-in-one bundle. Preserve that meaning for saved profiles;
-            # explicit ``--type plugins`` now means plugin directories only.
-            migration = _SYNC_MIGRATIONS["bundle"]
-        if sync_type in _SYNC_CONFIRM_TYPES and not yes and not dry_run:
-            if not sys.stdin.isatty():
-                raise click.ClickException(
-                    f"syncing {sync_type} may overwrite profile files; "
-                    "run it from a TTY or pass --yes"
-                )
-            if not ui.confirm(
-                f"Sync {sync_type} into profile '{profile}'? "
-                + (
-                    "Selected skills may be removed."
-                    if sync_type == "skills" and prune_skills
-                    else "Existing profile files may be overwritten."
-                ),
-                default=False,
-            ):
-                ui.warn(f"Skipped {sync_type} for profile '{profile}'.")
-                continue
-        ui.info(f"Syncing {sync_type} for profile '{profile}' ...")
-        if sync_type == "skills":
-            saved_options = mgr.profile_skill_sync_options(profile)
-            include = skill_include
-            exclude = skill_exclude
-            include_system = include_system_skills
-            prune = prune_skills
-            if saved_options is not None:
-                # A bare ``--prune-skills`` is a convenient way to apply the
-                # profile's saved allowlist while opting into cleanup.
-                if not skill_include and not skill_exclude and not include_system_skills:
-                    include = tuple(saved_options.get("include", ()))
-                    exclude = tuple(saved_options.get("exclude", ()))
-                    include_system = bool(saved_options.get("include_system", False))
-                prune = prune_skills or bool(saved_options.get("prune", False))
-            _copy_skills(
-                mgr.config.source_home,
-                profile_path,
-                include=include,
-                exclude=exclude,
-                include_system=include_system,
-                prune=prune,
-                dry_run=dry_run,
-            )
-        elif dry_run:
-            migration(mgr, profile_path, dry_run=True)
-        else:
-            # Keep the two-argument call for third-party/test migrations that
-            # predate the dry-run keyword.
-            migration(mgr, profile_path)
+    _sync_service(mgr).sync_profile(
+        profile,
+        yes=yes,
+        sync_types=sync_types,
+        skill_include=skill_include,
+        skill_exclude=skill_exclude,
+        include_system_skills=include_system_skills,
+        prune_skills=prune_skills,
+        dry_run=dry_run,
+        extra_sync_types=extra_sync_types,
+        # Keep this private mapping replaceable for integrations/tests that
+        # used the old CLI hook, while each default entry delegates to the
+        # service implementation.
+        migrations=_SYNC_MIGRATIONS,
+    )
 
 
 def _persist_sync_configuration(
@@ -498,29 +421,16 @@ def _persist_sync_configuration(
     instructions: bool,
 ) -> None:
     """Persist a successful sync plan after its filesystem work completes."""
-    if instructions:
-        mgr.record_profile_sync_type(profile, "instructions")
-    if not persist:
-        return
-
-    for sync_type in sync_types:
-        if sync_type in syncing.GRANULAR_SYNC_TYPES and sync_type != "skills":
-            for legacy_type in LEGACY_BUNDLE_TYPES:
-                mgr.remove_profile_sync_type(profile, legacy_type)
-        if sync_type == "skills":
-            mgr.record_profile_skill_sync_options(
-                profile,
-                include=includes,
-                exclude=excludes,
-                include_system=include_system_skills,
-                prune=prune_skills,
-            )
-            continue
-
-        # ``plugins`` is reserved for old profiles where it means the full
-        # bundle; a newly persisted explicit plugin sync is plugin-only.
-        saved_type = "plugins-only" if sync_type == "plugins" else sync_type
-        mgr.record_profile_sync_type(profile, saved_type)
+    _sync_service(mgr).persist_sync_configuration(
+        profile,
+        sync_types=sync_types,
+        includes=includes,
+        excludes=excludes,
+        include_system_skills=include_system_skills,
+        prune_skills=prune_skills,
+        persist=persist,
+        instructions=instructions,
+    )
 
 
 @click.group(
