@@ -170,10 +170,39 @@ class CodexAlias:
         profile_path = self.profile_home(profile, must_exist=True)
         hooks_mod.record_sync_type(profile_path, sync_type)
 
+    def remove_profile_sync_type(self, profile: str, sync_type: str) -> None:
+        """Forget one saved migration type for PROFILE."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        hooks_mod.remove_sync_type(profile_path, sync_type)
+
     def profile_sync_types(self, profile: str) -> tuple[str, ...]:
         """Return PROFILE's ordered migration types, if any were recorded."""
         profile_path = self.profile_home(profile, must_exist=True)
         return hooks_mod.saved_sync_types(profile_path)
+
+    def profile_skill_sync_options(self, profile: str) -> dict[str, object] | None:
+        """Return PROFILE's persisted skill selector, if one exists."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        return hooks_mod.saved_skill_sync_options(profile_path)
+
+    def record_profile_skill_sync_options(
+        self,
+        profile: str,
+        *,
+        include: tuple[str, ...] = (),
+        exclude: tuple[str, ...] = (),
+        include_system: bool = False,
+        prune: bool = False,
+    ) -> None:
+        """Persist PROFILE's skill selector and enable skill synchronization."""
+        profile_path = self.profile_home(profile, must_exist=True)
+        hooks_mod.record_skill_sync_options(
+            profile_path,
+            include=include,
+            exclude=exclude,
+            include_system=include_system,
+            prune=prune,
+        )
 
     def sync_profile_hooks(self, profile: str) -> HookSyncResult:
         """Reapply PROFILE's saved root-hook selection."""

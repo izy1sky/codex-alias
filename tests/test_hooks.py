@@ -346,6 +346,143 @@ def test_sync_instructions_option_mirrors_files_and_records_type(tmp_path) -> No
     assert state["sync"]["types"] == ["instructions"]
 
 
+def test_sync_all_profiles_runs_explicit_type_once_from_selected_source(
+    tmp_path,
+) -> None:
+    source = tmp_path / "root-codex"
+    configured_source = tmp_path / "wrong-source"
+    profile_root = tmp_path / "profiles"
+    (source / "skills" / "shared").mkdir(parents=True)
+    (source / "skills" / "shared" / "SKILL.md").write_text(
+        "shared root skill\n", encoding="utf-8"
+    )
+    configured_source.mkdir()
+    for name in ("alpha", "beta"):
+        (profile_root / name).mkdir(parents=True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "sync",
+            "--all",
+            "--type",
+            "bundle",
+            "--source",
+            str(source),
+            "--yes",
+        ],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(configured_source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    for name in ("alpha", "beta"):
+        target = profile_root / name
+        assert (target / "skills" / "shared" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ) == "shared root skill\n"
+        assert not (target / ".codexalias.json").exists()
+        assert f"Syncing bundle for profile '{name}'" in result.output
+
+
+def test_sync_explicit_types_are_distinct_and_keep_requested_order(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    (source / "skills" / "shared").mkdir(parents=True)
+    (source / "skills" / "shared" / "SKILL.md").write_text(
+        "skill\n", encoding="utf-8"
+    )
+    (source / "AGENTS.md").write_text("instructions\n", encoding="utf-8")
+    target.mkdir(parents=True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "sync",
+            "work",
+            "--type",
+            "instructions",
+            "--type",
+            "plugins",
+            "--yes",
+        ],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.index("Syncing instructions") < result.output.index(
+        "Syncing plugins"
+    )
+    assert (target / "AGENTS.md").read_text(encoding="utf-8") == "instructions\n"
+    assert not (target / "skills").exists()
+    assert not (target / ".codexalias.json").exists()
+
+
+def test_saved_legacy_plugins_type_still_syncs_the_full_bundle(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    (source / "skills" / "one").mkdir(parents=True)
+    (source / "plugins" / "cache").mkdir(parents=True)
+    (source / "rules").mkdir(parents=True)
+    (source / "prompts").mkdir(parents=True)
+    target.mkdir(parents=True)
+
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "plugins")
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--yes"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "skills" / "one").is_dir()
+    assert (target / "plugins" / "cache").is_dir()
+    assert (target / "rules").is_dir()
+    assert (target / "prompts").is_dir()
+
+
+def test_sync_rejects_profile_with_all_profiles(tmp_path) -> None:
+    result = CliRunner().invoke(cli, ["sync", "work", "--all"])
+
+    assert result.exit_code != 0
+    assert "cannot be used together" in result.output
+
+
+def test_sync_lists_independent_types() -> None:
+    result = CliRunner().invoke(cli, ["sync", "--list-types"])
+
+    assert result.exit_code == 0, result.output
+    for name in (
+        "skills",
+        "plugins",
+        "agents",
+        "mcp",
+        "rules",
+        "prompts",
+        "instructions",
+        "config",
+        "hooks",
+        "sessions_shared",
+        "sessions_migrate",
+    ):
+        assert name in result.output
+
+
 def test_add_bootstrap_offers_and_records_instruction_sync(mgr, monkeypatch) -> None:
     class FakeTty:
         @staticmethod
@@ -434,6 +571,204 @@ def test_plugin_sync_includes_rules_and_legacy_prompts(tmp_path, monkeypatch) ->
     assert (target / "prompts" / "review.md").read_text(encoding="utf-8") == "prompt\n"
 
 
+def test_skills_sync_supports_allowlist_and_excludes_system_by_default(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    for name in ("keep", "skip", ".system"):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(
+            f"{name}\n", encoding="utf-8"
+        )
+    target.mkdir(parents=True)
+
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--type", "skills", "--skill", "keep", "--yes"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "skills" / "keep" / "SKILL.md").is_file()
+    assert not (target / "skills" / "skip").exists()
+    assert not (target / "skills" / ".system").exists()
+
+
+def test_skills_sync_can_persist_selector_and_prune_stale_user_skills(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    for name in ("keep", "stale", ".system"):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(
+            f"{name}\n", encoding="utf-8"
+        )
+    target.mkdir(parents=True)
+    (target / "skills" / "stale").mkdir(parents=True)
+    (target / "skills" / "stale" / "old.txt").write_text("old\n", encoding="utf-8")
+    (target / "skills" / ".system").mkdir(parents=True)
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "plugins")
+
+    first = CliRunner().invoke(
+        cli,
+        [
+            "sync",
+            "work",
+            "--type",
+            "skills",
+            "--skill",
+            "keep",
+            "--save",
+            "--yes",
+        ],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+    assert first.exit_code == 0, first.output
+
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["skills"]
+    assert state["sync"]["skills"]["include"] == ["keep"]
+    assert (target / "skills" / "keep" / "SKILL.md").is_file()
+
+    second = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--prune-skills", "--yes"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+    assert second.exit_code == 0, second.output
+    assert not (target / "skills" / "stale").exists()
+    assert (target / "skills" / ".system").is_dir()
+
+
+def test_skills_listing_and_plugin_only_sync_are_separate(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    (source / "skills" / "one").mkdir(parents=True)
+    (source / "skills" / ".system").mkdir(parents=True)
+    (source / "plugins" / "cache").mkdir(parents=True)
+    target.mkdir(parents=True)
+    from codex_alias import hooks as hooks_module
+
+    hooks_module.record_sync_type(target, "plugins")
+
+    env = {
+        "HOME": str(tmp_path),
+        "CODEXALIAS_SOURCE_HOME": str(source),
+        "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+    }
+    listed = CliRunner().invoke(cli, ["sync", "--list-skills"], env=env)
+    assert listed.exit_code == 0, listed.output
+    assert "one" in listed.output
+    assert ".system" not in listed.output
+
+    listed_system = CliRunner().invoke(
+        cli, ["sync", "--list-skills", "--include-system-skills"], env=env
+    )
+    assert listed_system.exit_code == 0, listed_system.output
+    assert ".system" in listed_system.output
+
+    synced = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--type", "plugins", "--save", "--yes"],
+        env=env,
+    )
+    assert synced.exit_code == 0, synced.output
+    assert (target / "plugins" / "cache").is_dir()
+    assert not (target / "skills").exists()
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["types"] == ["plugins-only"]
+
+
+def test_skill_and_profile_lists_have_json_modes(tmp_path) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    (source / "skills" / "one").mkdir(parents=True)
+    target.mkdir(parents=True)
+    env = {
+        "HOME": str(tmp_path),
+        "CODEXALIAS_SOURCE_HOME": str(source),
+        "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+    }
+
+    skills_result = CliRunner().invoke(
+        cli, ["sync", "--list-skills", "--json"], env=env
+    )
+    assert skills_result.exit_code == 0, skills_result.output
+    assert json.loads(skills_result.output) == ["one"]
+
+    types_result = CliRunner().invoke(
+        cli, ["sync", "--list-types", "--json"], env=env
+    )
+    assert types_result.exit_code == 0, types_result.output
+    assert {item["name"] for item in json.loads(types_result.output)} >= {
+        "skills",
+        "plugins",
+        "rules",
+    }
+
+    profiles_result = CliRunner().invoke(cli, ["list", "--json"], env=env)
+    assert profiles_result.exit_code == 0, profiles_result.output
+    assert json.loads(profiles_result.output)[0]["name"] == "work"
+
+
+def test_select_skills_table_persists_the_selected_allowlist(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".codex"
+    profile_root = tmp_path / "profiles"
+    target = profile_root / "work"
+    for name in ("one", "two"):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(name, encoding="utf-8")
+    target.mkdir(parents=True)
+    (target / "skills" / "old").mkdir(parents=True)
+    (target / "skills" / "old" / "SKILL.md").write_text("old", encoding="utf-8")
+    (target / "skills" / ".system").mkdir(parents=True)
+    (target / "skills" / "migration-manifest.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    class FakeTty:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr(cli_module.sys, "stdin", FakeTty())
+    monkeypatch.setattr(cli_module.ui, "select_skills", lambda *args: {"two"})
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "work", "--select-skills", "--source", str(source), "--yes"],
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_PROFILE_ROOT": str(profile_root),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "skills" / "two" / "SKILL.md").is_file()
+    assert not (target / "skills" / "one").exists()
+    assert not (target / "skills" / "old").exists()
+    assert (target / "skills" / ".system").is_dir()
+    assert (target / "skills" / "migration-manifest.json").is_file()
+    state = json.loads((target / ".codexalias.json").read_text(encoding="utf-8"))
+    assert state["sync"]["skills"]["include"] == ["two"]
+    assert state["sync"]["skills"]["prune"] is True
+
+
 def test_record_sync_type_is_idempotent_and_preserves_order(mgr: CodexAlias) -> None:
     mgr.add_profile("work")
 
@@ -508,3 +843,20 @@ def test_hook_picker_keeps_checkbox_visible_on_narrow_terminal(monkeypatch) -> N
     rendered = rendered_console.export_text(styles=False)
     assert "> [x]" in rendered
     assert "  [ ]" in rendered
+
+
+def test_skill_picker_renders_selection_column_on_narrow_terminal(monkeypatch) -> None:
+    rendered_console = Console(width=42, record=True, force_terminal=False)
+    monkeypatch.setattr(ui, "console", rendered_console)
+
+    ui._render_skill_picker(
+        "work",
+        Path("/tmp/root/skills"),
+        ["review-mr", "domain-modeling"],
+        {"review-mr"},
+        0,
+    )
+
+    rendered = rendered_console.export_text(styles=False)
+    assert "> [x]" in rendered
+    assert "domain-modeling" in rendered

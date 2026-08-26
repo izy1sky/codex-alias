@@ -288,6 +288,83 @@ def record_sync_type(target_home: Path, sync_type: str) -> None:
         _write_json(profile_state_path(target_home), next_state, backup=False)
 
 
+def remove_sync_type(target_home: Path, sync_type: str) -> None:
+    """Remove one saved migration type without touching other state."""
+    sync_type = sync_type.strip()
+    if not sync_type:
+        raise HookConfigError("sync type must not be empty")
+    state, _ = _read_state(profile_state_path(target_home))
+    types = _sync_types_from_state(state)
+    if sync_type not in types:
+        return
+    next_state = copy.deepcopy(state)
+    sync = next_state.setdefault("sync", {})
+    if not isinstance(sync, dict):
+        sync = {}
+        next_state["sync"] = sync
+    sync[SYNC_TYPES_KEY] = [value for value in types if value != sync_type]
+    next_state.setdefault("version", 1)
+    if next_state != state:
+        target_home.mkdir(parents=True, exist_ok=True)
+        _write_json(profile_state_path(target_home), next_state, backup=False)
+
+
+def saved_skill_sync_options(target_home: Path) -> dict[str, Any] | None:
+    """Return the persisted skill selector for a profile, if configured."""
+    state, _ = _read_state(profile_state_path(target_home))
+    sync = state.get("sync")
+    if not isinstance(sync, dict):
+        return None
+    skills = sync.get("skills")
+    if not isinstance(skills, dict):
+        return None
+    includes = skills.get("include", [])
+    excludes = skills.get("exclude", [])
+    if not isinstance(includes, list) or not isinstance(excludes, list):
+        return None
+    return {
+        "include": tuple(value for value in includes if isinstance(value, str)),
+        "exclude": tuple(value for value in excludes if isinstance(value, str)),
+        "include_system": skills.get("include_system") is True,
+        "prune": skills.get("prune") is True,
+    }
+
+
+def record_skill_sync_options(
+    target_home: Path,
+    *,
+    include: tuple[str, ...] = (),
+    exclude: tuple[str, ...] = (),
+    include_system: bool = False,
+    prune: bool = False,
+) -> None:
+    """Persist a skill selector and enable the profile's ``skills`` sync."""
+    state, _ = _read_state(profile_state_path(target_home))
+    next_state = copy.deepcopy(state)
+    sync = next_state.setdefault("sync", {})
+    if not isinstance(sync, dict):
+        sync = {}
+        next_state["sync"] = sync
+    # A saved legacy ``plugins`` entry means “copy the old all-in-one bundle”
+    # and would defeat a newly selected skills allowlist. Saving granular skill
+    # settings therefore replaces that legacy entry; plugin/rule/prompt syncs
+    # can be enabled independently afterward.
+    types = [value for value in _sync_types_from_state(state) if value != "plugins"]
+    if "skills" not in types:
+        types.append("skills")
+    sync[SYNC_TYPES_KEY] = types
+    sync["skills"] = {
+        "include": list(dict.fromkeys(include)),
+        "exclude": list(dict.fromkeys(exclude)),
+        "include_system": include_system,
+        "prune": prune,
+    }
+    next_state.setdefault("version", 1)
+    if next_state != state:
+        target_home.mkdir(parents=True, exist_ok=True)
+        _write_json(profile_state_path(target_home), next_state, backup=False)
+
+
 def _selected_keys(
     state: dict[str, Any], target_document: dict[str, Any], source: list[_SourceHook]
 ) -> set[str]:

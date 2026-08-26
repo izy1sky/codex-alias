@@ -100,6 +100,34 @@ codexalias hooks
 # Reapply the profile's saved migration types from the source home
 codexalias sync [profile] [--yes]
 
+# One-shot sync one or more independently managed content types
+codexalias sync --all --type skills --source ~/.codex --yes
+codexalias sync --all --type plugins --type rules --type prompts --source ~/.codex --yes
+
+# Sync only selected skills; repeat --skill or use a file
+codexalias sync --all --type skills \
+  --skill review-mr --skill domain-modeling --source ~/.codex --yes
+codexalias sync --all --type skills --skills-file ./skills.allowlist \
+  --exclude-skill grilling --source ~/.codex --yes
+
+# Persist the selector for future `codexalias sync <profile>` calls
+codexalias sync --all --type skills --skill review-mr --save --source ~/.codex --yes
+
+# Preview or clean stale user skills (never removes .system)
+codexalias sync --all --type skills --skill review-mr --dry-run --source ~/.codex
+codexalias sync --all --type skills --skill review-mr --prune-skills --source ~/.codex --yes
+
+# Show all independently selectable sync types
+codexalias sync --list-types
+
+# Interactive skill table (selection is persisted and unselected user skills are removed)
+codexalias sync <profile> --select-skills --source ~/.codex --yes
+
+# Machine/AI-readable inventory
+codexalias list --json
+codexalias sync --list-skills --json --source ~/.codex
+codexalias sync --list-types --json
+
 # Enable global instruction sync for an existing profile, then sync it
 codexalias sync <profile> --instructions --yes
 ```
@@ -158,12 +186,33 @@ hooks are bound to their root plugin directory so `${PLUGIN_ROOT}` continues to
 work outside the plugin's own context.
 
 The ordered migration types chosen during `add` are stored in the profile's
-`.codexalias.json` (`plugins`, `instructions`, `config`, `hooks`,
-`sessions_shared`, or `sessions_migrate`). Running `codexalias sync <profile>`
-walks those types in order and invokes each type's migration logic again. Use
-`--instructions` once to enable instruction sync for an existing profile.
+`.codexalias.json`. New profiles can manage `skills`, `plugins`, `agents`,
+`mcp`, `rules`, `prompts`, `instructions`, `config`, `hooks`, `sessions_shared`,
+and `sessions_migrate` independently. The `bundle` type is available for the
+old all-in-one behavior. For backward compatibility, a profile whose saved
+state contains the historical `plugins` type still runs that bundle; an
+explicit `--type plugins` means only `plugins/` and `.plugins/`.
+Running `codexalias sync <profile>` walks the saved types in order.
+
+Use `--type TYPE` for a one-shot sync that does not change saved settings;
+repeat the option to run multiple types. Use `--all` (or `--all-profiles`) to
+target every profile, and `--source PATH` to pin the source home explicitly when
+the current process already has a profile-specific `CODEX_HOME`.
+
+Skills are selectable by `--skill NAME`, `--exclude-skill NAME`, or
+`--skills-file PATH`. An empty include list means all non-system skills;
+`.system` is excluded unless `--include-system-skills` is explicit. `--save`
+persists the selector per profile, `--dry-run` previews file operations, and
+`--prune-skills` removes only non-selected user skills from the target; it never
+removes `.system`. Use `--list-skills` to inspect available skill names.
+`--select-skills` opens the same keyboard-driven table used for hooks, saves
+the resulting allowlist, and enables pruning of unselected user skills. It
+never removes `.system`. `--json` is available for profile, skill, and
+sync-type inventories so an AI or shell script can inspect state without
+parsing Rich output, then issue an explicit `--type/--skill/--save` command.
+
 Plugin/instruction/config sync asks for confirmation before overwriting profile
-files; pass `--yes` for an explicit non-interactive approval. Instruction sync
+files; pass `--yes` for explicit non-interactive approval. Instruction sync
 mirrors both global instruction filenames and removes a stale target override
 when it no longer exists in the source home. Profile-local hooks are preserved;
 hook-specific ownership snapshots remain internal to the hook migration so

@@ -426,6 +426,92 @@ def select_hooks(
     return selected
 
 
+def _render_skill_picker(
+    profile: str,
+    source_path: Path,
+    names: list[str],
+    selected: set[str],
+    cursor: int,
+) -> None:
+    console.clear()
+    heading(f"Skills -> {profile}")
+    console.print(f"[dim]Source: {source_path}[/]")
+    table = Table(show_header=True, expand=True, box=None, pad_edge=False)
+    table.add_column("", width=5, no_wrap=True, overflow="crop")
+    table.add_column("Selected", width=8, no_wrap=True)
+    table.add_column("Skill", ratio=1, style="cyan", overflow="ellipsis")
+    for index, name in enumerate(names):
+        pointer = ">" if index == cursor else " "
+        marker = "[x]" if name in selected else "[ ]"
+        marker_style = "bold green" if name in selected else "dim"
+        selection = Text()
+        selection.append(pointer)
+        selection.append(" ")
+        selection.append(marker, style=marker_style)
+        table.add_row(
+            selection,
+            "yes" if name in selected else "no",
+            name,
+            style="reverse" if index == cursor else None,
+        )
+    console.print(table)
+    console.print(
+        "[dim]↑/↓ or j/k move   Space toggle   a all   n none   "
+        "Enter save   q cancel[/]"
+    )
+
+
+def select_skills(
+    profile: str,
+    source_path: Path,
+    names: list[str],
+    selected: set[str] | None = None,
+) -> set[str] | None:
+    """Interactively select skill names; return None when cancelled."""
+    if not names:
+        heading(f"Skills -> {profile}")
+        console.print(f"[dim]Source: {source_path}[/]")
+        warn("No selectable skills found in the source home.")
+        return set()
+    if not sys.stdin.isatty():
+        raise RuntimeError("skill selection requires an interactive terminal")
+
+    selected_names = set(names if selected is None else selected)
+    selected_names.intersection_update(names)
+    cursor = 0
+    try:
+        with _raw_key_mode():
+            while True:
+                _render_skill_picker(
+                    profile, source_path, names, selected_names, cursor
+                )
+                key = _read_key()
+                if key == "confirm":
+                    break
+                if key == "cancel":
+                    console.clear()
+                    warn("Skill selection cancelled; nothing was written.")
+                    return None
+                if key == "up":
+                    cursor = (cursor - 1) % len(names)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(names)
+                elif key == "toggle":
+                    name = names[cursor]
+                    if name in selected_names:
+                        selected_names.remove(name)
+                    else:
+                        selected_names.add(name)
+                elif key == "all":
+                    selected_names = set(names)
+                elif key == "none":
+                    selected_names.clear()
+    except (ImportError, OSError, RuntimeError) as exc:
+        raise RuntimeError(f"cannot start skill selection TUI: {exc}") from exc
+    console.clear()
+    return selected_names
+
+
 def render_hook_sync_result(result: HookSyncResult) -> None:
     heading("Profile hooks")
     if result.changed:
