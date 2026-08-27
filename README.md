@@ -79,6 +79,9 @@ codexalias share-sessions <profile> [source|@source]
 # Run codex once with a profile (without creating a wrapper)
 codexalias run <profile> [codex args...]
 
+# Shortcut: run a profile and forward all remaining args to Codex
+codexa <profile> [codex args...]
+
 # List profiles
 codexalias list
 
@@ -237,10 +240,12 @@ as well.
 `default` and every added profile. After the profile is selected, it asks
 whether to fix the copied session's provider and model. A `y` reads both
 values from the target profile's top-level `config.toml`, repairs the new
-session's JSONL and SQLite metadata, and then launches Codex. An `n` keeps the
-existing behavior and leaves the copied model unchanged. The source session is
-never modified. This also works when profiles share session storage through
-symlinks because the cloned session has a distinct ID.
+session's JSONL and SQLite metadata, and then launches Codex. Profiles using
+Codex's built-in auth may omit `model_provider`; in that case the source
+session's provider is preserved. An `n` keeps the existing behavior and leaves
+the copied model unchanged. The source session is never modified. This also
+works when profiles share session storage through symlinks because the cloned
+session has a distinct ID.
 
 The clone also applies registered response-item compatibility mappings,
 regardless of the fix prompt. The current `gpt-5*` rule clears non-empty

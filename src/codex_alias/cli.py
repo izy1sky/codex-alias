@@ -107,6 +107,15 @@ def _configure_profile_hooks(mgr: CodexAlias, profile: str) -> None:
     ui.render_hook_sync_result(mgr.configure_profile_hooks(profile, selected))
 
 
+class ProfileShortcutGroup(click.Group):
+    """Allow ``codexa PROFILE [codex args...]`` as shorthand for ``run``."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args.insert(0, "run")
+        return super().parse_args(ctx, args)
+
+
 def _bootstrap_profile(mgr: CodexAlias, profile_path: Path) -> None:
     """Interactive post-create setup, matching the shell tool's prompts."""
     if not sys.stdin.isatty():
@@ -157,11 +166,26 @@ def _copy_plugin_dirs(src: Path, dst: Path) -> None:
     for name in _PLUGIN_DIRS:
         src_dir = src / name
         if src_dir.is_dir():
-            shutil.copytree(src_dir, dst / name, dirs_exist_ok=True)
+            shutil.copytree(
+                src_dir,
+                dst / name,
+                dirs_exist_ok=True,
+                copy_function=_copy_skipping_dangling_links,
+            )
             ui.success(f"Copied plugin dir: {name}")
             copied = True
     if not copied:
         ui.info(f"No plugin directories found in {src}.")
+
+
+def _copy_skipping_dangling_links(src: str, dst: str) -> None:
+    """copy2, but skip symlinks whose target no longer exists."""
+    import os
+    import shutil
+
+    if os.path.islink(src) and not os.path.exists(src):
+        return
+    shutil.copy2(src, dst)
 
 
 def _copy_instruction_files(src: Path, dst: Path) -> None:
@@ -273,6 +297,7 @@ def _sync_profile(mgr: CodexAlias, profile: str, *, yes: bool = False) -> None:
 
 
 @click.group(
+    cls=ProfileShortcutGroup,
     context_settings={"help_option_names": ["-h", "--help"]},
     invoke_without_command=False,
 )
