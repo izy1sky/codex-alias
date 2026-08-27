@@ -103,7 +103,14 @@ class SessionService:
         self, query: str, target_home: Path, *, allow_lossy: bool = True
     ) -> SessionCloneResult:
         src_home, session = self.find_session(query)
-        provider = sessions_mod.configured_model_provider(target_home)
+        provider = sessions_mod.configured_model_provider_or_none(target_home)
+        if provider is None:
+            provider, _, _ = sessions_mod.inspect_session_source(session)
+        if provider is None:
+            raise SessionRepairError(
+                f"session provider is missing in both {session.path} and "
+                f"config: {target_home / 'config.toml'}"
+            )
         model = sessions_mod.configured_model_or_none(target_home)
         mapping_context = self._session_mapping_context(
             session, src_home, target_home, provider, model

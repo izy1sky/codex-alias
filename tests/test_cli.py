@@ -40,6 +40,28 @@ def test_run_forwards_unknown_codex_options(monkeypatch) -> None:
     ]
 
 
+def test_profile_shortcut_forwards_codex_options(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.delenv("SHELL", raising=False)
+
+    def fake_execvpe(file: str, argv: list[str], env: dict[str, str]) -> None:
+        captured.update(file=file, argv=argv, env=env)
+
+    monkeypatch.setattr("codex_alias.cli.os.execvpe", fake_execvpe)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "luna-high",
+            "--yolo",
+            "--model",
+            "gpt-5.6-sol",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["argv"] == ["codex", "--yolo", "--model", "gpt-5.6-sol"]
+
+
 def test_run_forwards_help_after_profile(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.delenv("SHELL", raising=False)
@@ -168,6 +190,50 @@ def test_resume_can_fix_provider_and_model_before_launch(
         "model": "deepseek-v4-pro",
         "model_provider_id": "deepseek",
     }
+
+
+def test_resume_uses_source_provider_for_builtin_auth_profile(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("SHELL", raising=False)
+    source = tmp_path / ".codex"
+    write_session(
+        source,
+        SID,
+        content=json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": SID, "model_provider": "openai"},
+            }
+        )
+        + "\n",
+    )
+    target = tmp_path / "profiles" / "luna-high"
+    target.mkdir(parents=True)
+    (target / "config.toml").write_text(
+        'model = "gpt-5.6-sol"\n', encoding="utf-8"
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "codex_alias.cli.os.execvpe",
+        lambda file, argv, env: captured.update(file=file, argv=argv, env=env),
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["resume", SID, "--profile", "luna-high"],
+        input="y\n",
+        env={
+            "HOME": str(tmp_path),
+            "CODEXALIAS_SOURCE_HOME": str(source),
+            "CODEXALIAS_PROFILE_ROOT": str(tmp_path / "profiles"),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    copied = next(target.glob("sessions/**/*.jsonl"))
+    record = json.loads(copied.read_text(encoding="utf-8"))
+    assert record["payload"]["model_provider"] == "openai"
 
 
 def test_resume_skips_fix_when_declined(monkeypatch, tmp_path) -> None:

@@ -6,6 +6,7 @@ which files to copy/remove and returns messages for the caller to render.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,7 +96,12 @@ def copy_resource_dirs(
                     SyncMessage("info", f"Would copy {label} dir: {name}")
                 )
             else:
-                shutil.copytree(src_dir, dst / name, dirs_exist_ok=True)
+                shutil.copytree(
+                    src_dir,
+                    dst / name,
+                    dirs_exist_ok=True,
+                    copy_function=_copy_skipping_dangling_links,
+                )
                 messages.append(
                     SyncMessage("success", f"Copied {label} dir: {name}")
                 )
@@ -103,6 +109,12 @@ def copy_resource_dirs(
     if not copied:
         messages.append(SyncMessage("info", f"No {label} directories found in {src}."))
     return tuple(messages)
+
+
+def _copy_skipping_dangling_links(src: str, dst: str) -> None:
+    if os.path.islink(src) and not os.path.exists(src):
+        return
+    shutil.copy2(src, dst)
 
 
 def copy_plugin_dirs(

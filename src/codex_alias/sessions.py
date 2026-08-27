@@ -276,6 +276,20 @@ def configured_model_provider(home: Path) -> str:
     return provider.strip()
 
 
+def configured_model_provider_or_none(home: Path) -> str | None:
+    """Read the configured provider, allowing Codex's built-in default."""
+    config_path = home / "config.toml"
+    data = _read_config(home)
+    provider = data.get("model_provider")
+    if provider is None:
+        return None
+    if not isinstance(provider, str) or not provider.strip():
+        raise SessionRepairError(
+            f"invalid top-level model_provider in config: {config_path}"
+        )
+    return provider.strip()
+
+
 def configured_model(home: Path) -> str:
     """Read the active top-level model from ``home/config.toml``."""
     config_path = home / "config.toml"
